@@ -3,6 +3,7 @@ import { getCurrentUser } from "@/lib/auth";
 import { prisma } from "@/lib/db";
 import { ownerWhere, healStale } from "@/lib/ownership";
 import { MAX_AGENTS_PER_USER } from "@/lib/limits";
+import { isMissingPersonaLinkedColumn } from "@/lib/zynd";
 import { Dashboard } from "@/components/Dashboard";
 import type { AgentView } from "@/components/types";
 
@@ -23,11 +24,27 @@ export default async function Home({
       ? { kind: "ok" as const, text: "Zynd Persona connected — your agent is redeploying with memory enabled." }
       : null;
 
-  const rows = await prisma.agent.findMany({
-    where: ownerWhere(user),
-    orderBy: { createdAt: "desc" },
-    select: { id: true, userId: true, name: true, slug: true, status: true, hostUrl: true, personalityId: true, personaLinked: true, createdAt: true },
-  });
+  const where = ownerWhere(user);
+  const orderBy = { createdAt: "desc" } as const;
+  const baseSelect = {
+    id: true, userId: true, name: true, slug: true, status: true,
+    hostUrl: true, personalityId: true, createdAt: true,
+  } as const;
+
+  // Read personaLinked, but tolerate its absence if the deploy landed before the
+  // DB migration — fall back to defaulting it false so the dashboard still renders.
+  let rows: Array<{
+    id: string; userId: string; name: string; slug: string; status: string;
+    hostUrl: string | null; personalityId: string | null; createdAt: Date; personaLinked: boolean;
+  }>;
+  try {
+    rows = await prisma.agent.findMany({ where, orderBy, select: { ...baseSelect, personaLinked: true } });
+  } catch (e) {
+    if (!isMissingPersonaLinkedColumn(e)) throw e;
+    rows = (await prisma.agent.findMany({ where, orderBy, select: baseSelect }))
+      .map((r) => ({ ...r, personaLinked: false }));
+  }
+
   await healStale(user, rows);
   const agents: AgentView[] = rows.map((a) => ({
     id: a.id,

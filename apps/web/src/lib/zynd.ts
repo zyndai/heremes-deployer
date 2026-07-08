@@ -8,6 +8,15 @@ export function zyndMemoryBaseUrl(): string {
   return (process.env.ZYND_MEMORY_URL ?? "https://api.zynd.ai").replace(/\/+$/, "");
 }
 
+// True when a query failed because the Agent.personaLinked column doesn't exist
+// yet (deploy landed before the DB migration). Lets reads fall back gracefully
+// instead of 500-ing the dashboard. Remove once the column is applied in every
+// environment. Matches Prisma P2022 / Postgres 42703 for that column.
+export function isMissingPersonaLinkedColumn(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /personaLinked/.test(msg) && /(P2022|42703|does not exist|column)/i.test(msg);
+}
+
 export function zyndOauthClientId(): string {
   return process.env.ZYND_OAUTH_CLIENT_ID ?? "hermes-deployer";
 }
