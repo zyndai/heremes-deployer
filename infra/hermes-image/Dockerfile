@@ -13,13 +13,9 @@ FROM ${HERMES_BASE}
 
 COPY patch-telegram-ua.py /tmp/patch-telegram-ua.py
 COPY patch-empty-assistant.py /tmp/patch-empty-assistant.py
-COPY patch-ingest-tee.py /tmp/patch-ingest-tee.py
 # Run as root for the in-place edit; the base image's own entrypoint drops to
 # HERMES_UID at runtime, so this doesn't change the runtime user.
-# Order matters: patch-ingest-tee.py anchors on the `surviving_call_ids` line and
-# must run AFTER patch-empty-assistant.py, whose anchor spans that same line.
 USER root
 RUN python3 /tmp/patch-telegram-ua.py /opt/hermes/hermes_cli/web_server.py \
     && python3 /tmp/patch-empty-assistant.py /opt/hermes/agent/agent_runtime_helpers.py \
-    && python3 /tmp/patch-ingest-tee.py /opt/hermes/agent/agent_runtime_helpers.py \
-    && rm -f /tmp/patch-telegram-ua.py /tmp/patch-empty-assistant.py /tmp/patch-ingest-tee.py
+    && rm -f /tmp/patch-telegram-ua.py /tmp/patch-empty-assistant.py

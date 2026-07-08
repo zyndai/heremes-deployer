@@ -13,10 +13,6 @@ export interface DispatchDeps {
   sendTyping?(chatId: number): Promise<void>;
   resolveAgent(tenantId: string): Promise<AgentEndpoint | null>;
   askAgent(agent: AgentEndpoint, sessionKey: string, text: string): Promise<string>;
-  // Fire-and-forget tee of the raw user turn into ZYND memory (persona-linked
-  // agents only). Optional so unlinked deployments and tests need not wire it;
-  // MUST NOT throw or block the relay.
-  ingest?(agent: AgentEndpoint, conversationId: string, text: string): void;
   now?: () => number;
 }
 
@@ -103,12 +99,6 @@ export async function handleUpdate(update: TelegramUpdate, deps: DispatchDeps): 
     );
     return;
   }
-
-  // Capture the user turn into ZYND memory before relaying. Fire-and-forget and
-  // linked-agents-only (deps.ingest no-ops for the rest), so it never delays or
-  // breaks the reply. Keyed by tenantId so all of a chat's turns share a
-  // conversation; the ingest bearer identifies the owner.
-  deps.ingest?.(agent, link.tenantId, text);
 
   // Telegram's typing action lasts ~5s; refresh every 4s while the agent works.
   let typing: ReturnType<typeof setInterval> | undefined;

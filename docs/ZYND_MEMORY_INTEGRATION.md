@@ -1,12 +1,14 @@
 # Zynd Persona Memory — Hermes Deployer × memory-layer
 
-**What it does:** lets any user give their deployed Hermes agent a personal,
-persistent memory tied to their Zynd account. After a one-click **Connect Zynd
-Persona**, everything the user types (dashboard chat *and* Telegram) is ingested
-into their private ZYND memory, and the agent can recall it. Off by default —
-nothing changes for an agent until its owner opts in.
+**What it does:** a one-click **Connect Zynd Persona** gives a deployed Hermes
+agent its owner's ZYND memory over **MCP** — the agent can save durable facts
+(`remember`) and recall them (`get_my_context`), scoped privately to that owner.
+Off by default; nothing changes for an agent until its owner connects.
 
-Built 2026-07-08.
+> Design note: this is the **MCP-per-agent** approach. We deliberately did *not*
+> add deterministic ingest tees or an image patch — see
+> [ZYND_MEMORY_APPROACH_REVIEW.md](./ZYND_MEMORY_APPROACH_REVIEW.md) for why
+> (fragility of patching the black-box Nous image vs. idiomatic MCP).
 
 ---
 
@@ -23,17 +25,14 @@ Built 2026-07-08.
         │
         ▼
  deployer-worker redeploys the agent with:
-   • ZYND_MEMORY_TOKEN / ZYND_MEMORY_URL in the container env
-   • an mcp_servers.zynd block in config.yaml   → agent can RECALL memory
+   • an mcp_servers.zynd block in config.yaml (url + Bearer token)
         │
         ▼
- Every user turn is INGESTED into that owner's ZYND memory:
-   • Telegram  → telegram-gateway tee
-   • Dashboard → in-image patch (dashboard chat is a websocket)
+ Agent has memory over MCP: remember (write) + get_my_context (read),
+ bearer-scoped to the owner. No ingest endpoint, no image patch.
 ```
 
-Each agent is single-tenant: only its owner's messages go into that owner's
-memory, authenticated by the owner's token.
+Each agent is single-tenant: the token scopes memory to that one owner.
 
 ---
 
@@ -43,90 +42,86 @@ memory, authenticated by the owner's token.
 2. A **Connect Zynd Persona** button appears on the agent card.
 3. Click → sign in with Google (same Zynd identity) → redirected back.
 4. Banner: *"Zynd Persona connected — your agent is redeploying with memory
-   enabled."* The agent restarts once to wire memory in.
-5. From then on, messages are captured to memory and the agent can recall them.
-   The button becomes **Reconnect** (rotates the token).
+   enabled."* The agent restarts once to wire the MCP server in.
+5. The agent can now recall/save memory via its ZYND MCP tools. Button becomes
+   **Reconnect** (rotates the token).
 
-Failure at any step bounces back with a visible `?zynd_error=…` banner — never a
-silent failure.
+Failure at any step bounces back with a visible `?zynd_error=…` banner.
 
 ---
 
-## 3. How capture works (two paths)
+## 3. How memory works (MCP)
 
-Messages arrive two ways, so there are two tees. Both are **fire-and-forget**
-(a memory outage never breaks the chat), short turns (<40 chars) are dropped
-server-side as noise, and duplicates are ignored.
+memory-layer already ships an authenticated MCP server (`/mcp`, streamable-HTTP,
+bearer-scoped per user). The Nous Hermes agent natively supports `mcp_servers` in
+`config.yaml`, so the worker just seeds that block with the owner's token:
 
-| Channel | How it's captured |
-|---|---|
-| **Telegram** | `telegram-gateway` reads the agent's `ZYND_MEMORY_TOKEN` (via `docker inspect`) and POSTs each linked user turn to `/ingest`. |
-| **Dashboard** | The dashboard chat is a WebSocket the outside can't tap, so an in-image patch (`patch-ingest-tee.py`) hooks the agent's `sanitize_api_messages` and POSTs the latest user turn on a daemon thread. Covers dashboard + cron too. |
+```yaml
+mcp_servers:
+  zynd:
+    url: "https://api.zynd.ai/mcp"
+    headers:
+      Authorization: "Bearer <owner 90-day token>"
+```
 
-Recall (both channels) is via the MCP server wired into `config.yaml`: the agent
-gets `remember` (save a fact) and `get_my_context` (what do you know about me)
-tools, bearer-scoped to the owner.
+The agent then has the memory-layer MCP toolset — chiefly:
+- **`remember`** — save a durable fact the user shared.
+- **`get_my_context`** — recall what ZYND knows about the user.
+
+Memory is **agent-driven**: the model calls `remember` for salient facts. To make
+it proactive, nudge it via the agent's system prompt (e.g. *"save durable facts
+to ZYND memory; check get_my_context each session"*). memory-layer's extraction
+pipeline turns saved turns into a structured, decaying assertion graph.
 
 ---
 
 ## 4. What changed, by repo
 
 ### `memory-layer` (Python)
-- **`app/config.py`** — added a second OAuth client (`hermes-deployer` +
-  secret) and deployer redirect-origin allowlist.
-- **`app/oauth.py`** — accept both clients; the deployer's `authorization_code`
-  exchange returns a **90-day personal token** (no refresh loop needed in a
-  container). Security hardening: constant-time client check; `redirect_uri`
-  bound to the auth code and re-validated at `/token` (RFC 6749 §4.1.3).
-- **`tests/test_oauth_clients.py`** — new unit tests (client logic + redirect_uri
-  binding).
+- **`app/config.py`** — second OAuth client (`hermes-deployer` + secret) and
+  deployer redirect-origin allowlist.
+- **`app/oauth.py`** — the deployer's `authorization_code` exchange returns a
+  **90-day personal token**; constant-time client check; redirect_uri bound to
+  the auth code and re-validated at `/token` for confidential clients (RFC 6749
+  §4.1.3), while PKCE clients (Claude) keep their `code_verifier` binding.
+- **`tests/test_oauth_clients.py`** — client + binding unit tests.
 
 ### `hermes-deployer` — web (`apps/web`, TypeScript)
-- **`src/lib/zynd.ts`** *(new)* — memory-layer URL / client id / secret helpers +
-  a proxy-safe origin helper (does **not** trust `x-forwarded-host`).
-- **`src/components/AgentCard.tsx`** — the Connect / Reconnect button + connected
-  state.
-- **`src/app/api/agents/[id]/zynd/connect/route.ts`** *(new)* — starts the OAuth
-  flow with an HMAC-signed `state` (binds agent + owner → login-CSRF safe).
-- **`src/app/api/agents/[id]/zynd/callback/route.ts`** *(new)* — verifies state +
-  session, exchanges the code, merges `ZYND_MEMORY_TOKEN`/`ZYND_MEMORY_URL` into
-  the agent's encrypted secret, sets `personaLinked` + re-queues the redeploy.
-- **`page.tsx` / `Dashboard.tsx` / `types.ts` / `api/agents/*`** — thread the new
-  `personaLinked` flag through + the success/error banner.
+- **`src/lib/zynd.ts`** — memory-layer URL / client creds + a proxy-safe origin
+  helper (never trusts `x-forwarded-host`).
+- **`src/components/AgentCard.tsx`** — Connect / Reconnect button + connected
+  indicator.
+- **`src/app/api/agents/[id]/zynd/connect|callback/route.ts`** — the OAuth flow
+  (HMAC-signed state = login-CSRF safe; exchange code; merge token into the
+  encrypted agent secret; set `personaLinked` + re-queue the redeploy).
+- **`page.tsx` / `Dashboard.tsx` / `types.ts` / `api/agents/*`** — thread the
+  `personaLinked` flag + the success/error banner.
 
 ### `hermes-deployer` — worker (`packages/deployer-worker`, TypeScript)
-- **`prisma/schema.prisma`** — new `Agent.personaLinked` field.
-- **`src/secrets.ts`** — `buildAgentEnv` injects the ZYND env; `buildZyndMcpBlock`
-  + `mergeZyndMcpBlock` build/merge the `mcp_servers.zynd` config (idempotent,
+- **`prisma/schema.prisma`** — `Agent.personaLinked`.
+- **`src/secrets.ts`** — inject the ZYND token/URL env; `buildZyndMcpBlock` +
+  `mergeZyndMcpBlock` build/merge the `mcp_servers.zynd` config (idempotent,
   rotates on reconnect, refuses a foreign `mcp_servers`).
 - **`src/lifecycle.ts`** — `ensureZyndMcpConfig` merges the MCP block into
-  `config.yaml` on every deploy of a linked agent; gracefully skips if the file
+  `config.yaml` on every deploy of a linked agent; skips gracefully if the file
   is sealed to the container uid.
-- **tests** — new ZYND/MCP tests; fixed 2 pre-existing stale Cloudflare-model
-  tests + a pre-existing TS strictness error.
+- **`bin/agents-status.ts`** — ops script: fleet + who's linked.
 
-### `hermes-deployer` — Telegram (`packages/telegram-gateway`, TypeScript)
-- **`src/zynd-ingest.ts`** *(new)* — the `/ingest` client.
-- **`src/types.ts` / `src/agent-resolver.ts`** — `AgentEndpoint` carries the ZYND
-  token/URL, read from container env.
-- **`src/dispatch.ts` / `bin/gateway.ts`** — tee every linked user turn.
-- **`test/dispatch.test.ts`** — new tee tests.
-
-### `hermes-deployer` — agent image (`infra/hermes-image`)
-- **`patch-ingest-tee.py`** *(new)* — the dashboard-capture patch.
-- **`Dockerfile`** — runs the patch (after `patch-empty-assistant.py`).
-- **`README.md`** — documents the patch + the anchor re-verify step.
+> **No `telegram-gateway` or `infra/hermes-image` changes.** No ingest tee, no
+> image patch, no image rebuild — the stock Nous image is used as-is.
 
 ---
 
 ## 5. What it affects
 
-- **Unlinked agents:** no change — behave exactly as before.
-- **Linked agents:** one brief redeploy when connected, to wire memory in.
+- **Unlinked agents:** no change.
+- **Linked agents:** one brief redeploy when connected, to seed the MCP config.
 - **Privacy/security:** single-user per agent; the token is stored **encrypted**
-  (AES-GCM in the DB secret), never logged, never returned to the browser.
-- **memory-layer:** `persona_enabled` stays off — the flow works without it
-  (persona only gates profile seeding/matching).
+  (AES-GCM in the DB secret), never logged, never returned to the browser. The
+  token value is written into `config.yaml` on the agent's private bind mount
+  (0660, worker + container uid only — same tier as the Telegram bot token).
+- **memory-layer:** unchanged behavior for existing clients; the deployer is just
+  a new OAuth client.
 
 ---
 
@@ -134,32 +129,20 @@ tools, bearer-scoped to the owner.
 
 1. **Shared secret must match:** deployer `ZYND_OAUTH_CLIENT_SECRET` ⇄
    memory-layer `DEPLOYER_OAUTH_CLIENT_SECRET`.
-2. Set deployer `ZYND_MEMORY_URL` (e.g. `https://api.zynd.ai`) and
-   `DEPLOYER_PUBLIC_URL` (prod). `DEPLOYER_WS_SECRET` (already required) is reused
-   to sign the OAuth state.
-3. Ensure the deployer's callback origin is in memory-layer
-   `deployer_allowed_redirect_prefixes` (defaults cover `deployer.zynd.ai` +
-   localhost:3100).
+2. Deployer env: `ZYND_MEMORY_URL` (e.g. `https://api.zynd.ai`),
+   `DEPLOYER_PUBLIC_URL`. `DEPLOYER_WS_SECRET` (already required) signs the state.
+3. memory-layer: add the deployer callback origin to
+   `DEPLOYER_ALLOWED_REDIRECT_PREFIXES`.
 4. `prisma db push` in `packages/deployer-worker` (adds `personaLinked`).
-5. Rebuild + push the Hermes image (now carries `patch-ingest-tee.py`), bump
-   `HERMES_IMAGE`.
-
-### The one live check (needs Docker + the pinned image)
-Confirm the in-image patch anchor after any base-image bump:
-```bash
-docker run --rm --entrypoint cat <image> /opt/hermes/agent/agent_runtime_helpers.py
-```
-The patch **fails the build loudly** if the `sanitize_api_messages` anchor
-moved, so an unpatched image can never ship silently.
+5. Deploy `apps/web` (Vercel) + memory-layer (Render). **No image rebuild.**
 
 ---
 
 ## 7. Security
 
-Adversarial review passed. Verified safe against login-CSRF, code replay,
-cross-owner linking, token leakage, and open redirect. Three issues found and
-fixed: a timing side-channel in the client check, an open-redirect via a
-spoofable host header, and the missing `redirect_uri` binding at `/token`.
+Adversarial review passed. Fixed: timing side-channel in the client check,
+open-redirect via a spoofable host header, and the `redirect_uri` binding at
+`/token`. Verified safe against login-CSRF, code replay, and cross-owner linking.
 
 ---
 
@@ -167,8 +150,7 @@ spoofable host header, and the missing `redirect_uri` binding at `/token`.
 
 | Package | Result |
 |---|---|
-| memory-layer | 76 unit tests pass (154 collected, no import breakage) |
-| deployer-worker | 147/147 pass · typecheck clean |
-| telegram-gateway | 27 pass · typecheck clean |
+| memory-layer | oauth client + binding unit tests pass |
+| deployer-worker | ZYND/MCP unit tests pass · typecheck clean |
+| telegram-gateway | unchanged (back to stock) · tests pass |
 | apps/web | typecheck clean |
-| in-image patch | compiles, composes with existing patches, idempotent, fails-loud, behavioral test (real POST / dedup / no-token) all pass |

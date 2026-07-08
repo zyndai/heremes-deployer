@@ -38,24 +38,3 @@ docker build \
 
 Then set `HERMES_IMAGE` (in `/etc/hermes-deployer/worker.env`) to the tag you
 pushed and redeploy agents.
-
-## The other overlays
-
-Two more build-time patches edit `/opt/hermes/agent/agent_runtime_helpers.py`
-inside the pre-call sanitizer `sanitize_api_messages` (idempotent; each fails
-loudly if its anchor disappears on a version bump):
-
-- **`patch-empty-assistant.py`** — drops trailing empty assistant turns so
-  strict providers (Cloudflare Mistral/Llama/gpt-oss) don't reject the cron
-  loop's retry-with-empty history.
-- **`patch-ingest-tee.py`** — tees the latest user turn into ZYND memory
-  (`ZYND_MEMORY_URL/ingest`) on a daemon thread. This is how **dashboard**
-  (WebSocket) chats reach ZYND — an external HTTP proxy can't see them. No-op
-  unless `ZYND_MEMORY_TOKEN` is present (set only for persona-linked agents by
-  the worker). Must run **after** `patch-empty-assistant.py` — both anchor on
-  the same `surviving_call_ids` line.
-
-⚠️ Verify the sanitizer anchor after any base-image bump:
-`docker run --rm --entrypoint cat <image> /opt/hermes/agent/agent_runtime_helpers.py`.
-The patches abort the build if the anchor moved, so an unpatched image never
-ships silently.
