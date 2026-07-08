@@ -6,5 +6,6 @@ export interface AgentView {
   status: string;
   hostUrl: string | null;
   personalityId?: string;
+  personaLinked: boolean;
   createdAt: string;
 }

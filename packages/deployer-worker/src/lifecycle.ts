@@ -7,7 +7,7 @@
 //   - DB status is written FIRST, then emitStep — so a reconnecting socket
 //     can backfill the current step from the row (DB = source of truth).
 
-import { mkdir, chown, chmod, stat, writeFile } from "node:fs/promises";
+import { mkdir, chown, chmod, stat, writeFile, readFile } from "node:fs/promises";
 
 import { prisma } from "./db";
 import { config, paths, HERMES_UID, HERMES_GID } from "./config";
@@ -15,7 +15,14 @@ import { allocatePort, releasePort } from "./ports";
 import { runContainer, stopAndRemove, waitForHealth } from "./docker";
 import { addRoute, removeRoute } from "./caddy";
 import { readSecret } from "./db-secrets";
-import { buildAgentEnv, buildAgentConfigYaml, type LlmProvider } from "./secrets";
+import {
+  buildAgentEnv,
+  buildAgentConfigYaml,
+  buildZyndMcpBlock,
+  mergeZyndMcpBlock,
+  DEFAULT_ZYND_MEMORY_URL,
+  type LlmProvider,
+} from "./secrets";
 import { startTailer, stopTailer, appendSystemLog } from "./logs";
 import { emitStep, emitReady, emitDone, type StepName } from "./events";
 
@@ -165,16 +172,83 @@ async function seedConfigYaml(dataDir: string, yaml: string, agentId: string): P
     if (code !== "ENOENT") throw e;
   }
 
-  await writeFile(configPath, yaml, { mode: 0o660 });
+  await writeAgentConfigFile(configPath, yaml);
+  await appendSystemLog(agentId, "[worker] seeded config.yaml (model/provider)").catch(
+    () => undefined,
+  );
+}
+
+/**
+ * Write config.yaml with the shared 0660 perms + group ownership so the
+ * container uid (via HERMES_GID) can read AND rewrite it. Root chowns owner+gid;
+ * a non-root worker in HERMES_GID can only set the group, which is enough.
+ */
+async function writeAgentConfigFile(configPath: string, content: string): Promise<void> {
+  await writeFile(configPath, content, { mode: 0o660 });
   try {
     await chown(configPath, HERMES_UID, HERMES_GID);
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
     if (code !== "EPERM" && code !== "ENOSYS") throw e;
-    // Non-root worker: owner stays the worker user; group share is enough.
     await chown(configPath, -1, HERMES_GID);
   }
-  await appendSystemLog(agentId, "[worker] seeded config.yaml (model/provider)").catch(
+}
+
+/**
+ * Merge (or refresh) the ZYND mcp_servers block into an EXISTING config.yaml so
+ * a persona-linked agent can recall memory. Unlike seedConfigYaml (fresh dirs
+ * only), this runs on every deploy of a linked agent so a rotated token is
+ * picked up.
+ *
+ * Best-effort by design: if the gateway sealed config.yaml to the container uid
+ * (0700) on a prior boot and this worker is non-root, the file is unreadable —
+ * we log and skip rather than fail the deploy. A root worker (prod systemd) or a
+ * freshly recreated agent wires it cleanly.
+ */
+async function ensureZyndMcpConfig(
+  dataDir: string,
+  memoryUrl: string,
+  token: string,
+  agentId: string,
+): Promise<void> {
+  const configPath = `${dataDir}/config.yaml`;
+  const block = buildZyndMcpBlock(memoryUrl, token);
+
+  let existing: string;
+  try {
+    existing = await readFile(configPath, "utf8");
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      // No seed file (e.g. the anthropic provider seeds nothing) — create one
+      // holding just our block.
+      await writeAgentConfigFile(configPath, block);
+      await appendSystemLog(agentId, "[worker] wrote ZYND MCP config.yaml").catch(() => undefined);
+      return;
+    }
+    if (code === "EACCES" || code === "EPERM") {
+      await appendSystemLog(
+        agentId,
+        "[worker] config.yaml is sealed to the container uid; ZYND MCP recall not wired " +
+          "(run the worker as root or recreate the agent to enable it)",
+      ).catch(() => undefined);
+      return;
+    }
+    throw e;
+  }
+
+  const next = mergeZyndMcpBlock(existing, block);
+  if (next === null) {
+    await appendSystemLog(
+      agentId,
+      "[worker] config.yaml already defines mcp_servers outside our region; " +
+        "leaving ZYND MCP unmanaged to avoid a duplicate key",
+    ).catch(() => undefined);
+    return;
+  }
+  if (next === existing) return; // already current (same token)
+  await writeAgentConfigFile(configPath, next);
+  await appendSystemLog(agentId, "[worker] merged ZYND MCP config into config.yaml").catch(
     () => undefined,
   );
 }
@@ -319,6 +393,20 @@ export async function drive(agentId: string): Promise<void> {
       secret,
     });
     if (seedYaml) await seedConfigYaml(dataDir, seedYaml, agentId);
+
+    // Persona-linked agent: merge the ZYND memory MCP server into config.yaml so
+    // the agent can recall the owner's memory. Runs every deploy (idempotent) so
+    // a reconnect rotates the token. Best-effort — never fails the deploy.
+    const zyndToken = secret.ZYND_MEMORY_TOKEN;
+    if (zyndToken) {
+      const memoryUrl = secret.ZYND_MEMORY_URL || DEFAULT_ZYND_MEMORY_URL;
+      await ensureZyndMcpConfig(dataDir, memoryUrl, zyndToken, agentId).catch((err) =>
+        appendSystemLog(
+          agentId,
+          `[worker] ZYND MCP config skipped: ${scrubError((err as Error).message, secretValues)}`,
+        ).catch(() => undefined),
+      );
+    }
 
     containerId = await runContainer({
       agentId,

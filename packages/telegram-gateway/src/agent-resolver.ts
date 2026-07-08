@@ -20,9 +20,18 @@ export class LocalAgentResolver implements AgentResolver {
     const rec = this.store.get(tenantId) as (AgentRecord & { apiPort?: number }) | undefined;
     if (!rec || typeof rec.apiPort !== "number") return null;
     if (rec.status !== "running") return null;
-    const apiKey = await this.readEnv(`hermes-${tenantId}`, "API_SERVER_KEY");
+    const container = `hermes-${tenantId}`;
+    const apiKey = await this.readEnv(container, "API_SERVER_KEY");
     if (!apiKey) return null;
-    return { baseUrl: `http://localhost:${rec.apiPort}`, apiKey };
+    // ZYND memory creds are optional — only persona-linked agents carry them.
+    const zyndToken = await this.readEnv(container, "ZYND_MEMORY_TOKEN");
+    const zyndUrl = await this.readEnv(container, "ZYND_MEMORY_URL");
+    return {
+      baseUrl: `http://localhost:${rec.apiPort}`,
+      apiKey,
+      ...(zyndToken ? { zyndToken } : {}),
+      ...(zyndUrl ? { zyndUrl } : {}),
+    };
   }
 }
 

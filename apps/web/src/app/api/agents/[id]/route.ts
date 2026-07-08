@@ -14,6 +14,7 @@ const DETAIL_SELECT = {
   hostUrl: true,
   llmProvider: true,
   personalityId: true,
+  personaLinked: true,
   createdAt: true,
   startedAt: true,
 } as const;

@@ -8,3 +8,4 @@ export { TelegramApi, type BotCommand } from "./telegram-api";
 export { askAgent, type AskAgentOptions } from "./agent-client";
 export { LocalAgentResolver, type AgentResolver } from "./agent-resolver";
 export { loadGatewayConfig, type GatewayConfig } from "./config";
+export { ingestUserTurn, type ZyndIngestConfig } from "./zynd-ingest";

@@ -11,15 +11,20 @@ export function Dashboard({
   initialAgents,
   userName,
   maxAgents,
+  notice,
 }: {
   initialAgents: AgentView[];
   userName: string;
   maxAgents: number;
+  notice?: { kind: "ok" | "error"; text: string } | null;
 }) {
   const [agents, setAgents] = useState<AgentView[]>(initialAgents);
   const [modalOpen, setModalOpen] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  // Dismissible one-shot banner for the Connect Zynd Persona round-trip result
+  // (?zynd=connected / ?zynd_error=...). Seeded from the server prop.
+  const [noticeShown, setNoticeShown] = useState(true);
   const atLimit = agents.length >= maxAgents;
   const runningCount = agents.filter((agent) => agent.status === "running").length;
 
@@ -77,6 +82,7 @@ export function Dashboard({
         status: string;
         hostUrl: string | null;
         personalityId?: string;
+        personaLinked: boolean;
         createdAt: string;
       }>;
     };
@@ -88,6 +94,7 @@ export function Dashboard({
         status: a.status,
         hostUrl: a.hostUrl,
         ...(a.personalityId ? { personalityId: a.personalityId } : {}),
+        personaLinked: a.personaLinked,
         createdAt: a.createdAt,
       })),
     );
@@ -156,6 +163,24 @@ export function Dashboard({
       <div className="flex h-full w-full flex-col px-6 py-6 lg:px-8 relative z-10">
         {/* Main Content Area */}
         <div className="flex flex-1 flex-col overflow-hidden">
+
+          {notice && noticeShown && (
+            <div
+              className={`mb-6 shrink-0 inline-flex items-center gap-3 rounded-full border px-4 py-2 text-sm font-medium ${
+                notice.kind === "ok"
+                  ? "bg-green/10 border-green/20 text-green"
+                  : "bg-red/10 border-red/20 text-red"
+              }`}
+            >
+              <span>{notice.text}</span>
+              <button
+                onClick={() => setNoticeShown(false)}
+                className="text-xs uppercase tracking-widest opacity-70 hover:opacity-100"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
 
           {actionError && (
             <div className="mb-6 shrink-0 inline-flex items-center gap-3 rounded-full bg-red/10 border border-red/20 px-4 py-2 text-sm text-red font-medium">

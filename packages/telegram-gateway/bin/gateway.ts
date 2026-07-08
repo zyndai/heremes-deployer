@@ -8,6 +8,7 @@ import { askAgent } from "../src/agent-client";
 import { LocalAgentResolver, type AgentResolver } from "../src/agent-resolver";
 import { AwsAgentResolver } from "../src/aws-resolver";
 import { handleUpdate, type DispatchDeps } from "../src/dispatch";
+import { ingestUserTurn } from "../src/zynd-ingest";
 
 try {
   process.loadEnvFile();
@@ -62,6 +63,17 @@ async function main(): Promise<void> {
     sendTyping: (chatId) => api.sendChatAction(chatId, "typing"),
     resolveAgent: (tenantId) => resolver.resolve(tenantId),
     askAgent: (agent, sessionKey, text) => askAgent(agent, sessionKey, text, { model: cfg.model }),
+    ingest: (agent, conversationId, text) => {
+      // Persona-linked agents only; fire-and-forget so a memory outage never
+      // affects the reply. Errors are logged, not surfaced to the user.
+      if (!agent.zyndToken) return;
+      void ingestUserTurn(
+        { baseUrl: agent.zyndUrl ?? "https://api.zynd.ai", token: agent.zyndToken },
+        conversationId,
+        text,
+        new Date().toISOString(),
+      ).catch((err) => console.error("zynd ingest failed:", err instanceof Error ? err.message : err));
+    },
   };
 
   let offset = 0;

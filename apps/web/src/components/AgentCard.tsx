@@ -122,6 +122,33 @@ export function AgentCard({
           </div>
         )}
 
+        {running && agent.hostUrl && (
+          <div className="flex items-center gap-4 border border-foreground p-4">
+            <div className="flex-1 min-w-0">
+              <p className="text-[10px] font-mono font-bold uppercase tracking-widest text-muted-2 mb-1">Zynd Persona Memory</p>
+              <p className="block truncate font-mono text-sm text-muted">
+                {agent.personaLinked
+                  ? "Connected — this agent ingests your messages and can recall your ZYND memory."
+                  : "Give this agent your personal ZYND memory (ingest + recall)."}
+              </p>
+            </div>
+            {/* Full-page navigation (not a new tab): the OAuth flow redirects to
+                ZYND sign-in and back to /api/agents/<id>/zynd/callback, which must
+                land in this same window to complete the link. Reconnect rotates
+                the stored 90-day token. */}
+            <a
+              href={`/api/agents/${agent.id}/zynd/connect`}
+              className={`shrink-0 border px-5 py-2 text-xs font-mono font-bold uppercase transition ${
+                agent.personaLinked
+                  ? "border-muted-2 text-muted-2 hover:bg-muted-2 hover:text-white"
+                  : "border-foreground text-foreground hover:bg-foreground hover:text-white"
+              }`}
+            >
+              {agent.personaLinked ? "Reconnect" : "Connect Zynd Persona"}
+            </a>
+          </div>
+        )}
+
         {stopped && (
           <div className="border border-foreground p-4">
             <p className="text-sm font-mono text-muted">

@@ -40,6 +40,12 @@ model Agent {
   secretBlob    String?  @db.Text
   personalityId String?
 
+  // Zynd Persona / memory-layer link. Set true once the owner completes the
+  // "Connect Zynd Persona" OAuth flow; the per-agent ZYND memory token then
+  // rides secretBlob (key ZYND_MEMORY_TOKEN) and the worker wires the agent to
+  // ingest + query memory. Owner re-connects to rotate the token.
+  personaLinked Boolean  @default(false)
+
   apiPort       Int?                            // host port -> container 8642
   dashboardPort Int?                            // host port -> container 9119
   containerId   String?

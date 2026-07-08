@@ -99,6 +99,55 @@ describe("handleUpdate — messaging a linked agent", () => {
   });
 });
 
+describe("handleUpdate — ZYND ingest tee", () => {
+  it("tees the user turn to ingest, keyed by tenantId, for a linked chat", async () => {
+    // #given a linked chat and an ingest spy
+    const ingested: Array<{ agent: AgentEndpoint; conversationId: string; text: string }> = [];
+    const { deps, links } = makeDeps({
+      ingest: (agent, conversationId, text) => void ingested.push({ agent, conversationId, text }),
+    });
+    links.set(500, { chatId: 500, tenantId: "tenant-1", linkedAt: "x" });
+
+    // #when the user sends a message
+    await handleUpdate(msg(500, "I'm building a memory layer"), deps);
+
+    // #then exactly one turn is teed, keyed by tenant, with the raw text
+    expect(ingested).toHaveLength(1);
+    expect(ingested[0]?.conversationId).toBe("tenant-1");
+    expect(ingested[0]?.text).toBe("I'm building a memory layer");
+  });
+
+  it("does not tee for an unlinked chat", async () => {
+    // #given no link and an ingest spy
+    const ingested: unknown[] = [];
+    const { deps } = makeDeps({ ingest: () => void ingested.push(1) });
+
+    // #when an unlinked chat messages
+    await handleUpdate(msg(501, "hello"), deps);
+
+    // #then nothing is ingested (no owner to attribute it to)
+    expect(ingested).toHaveLength(0);
+  });
+
+  it("still captures the turn even if the agent reply fails", async () => {
+    // #given ingest runs before the relay, which throws
+    const ingested: unknown[] = [];
+    const { deps, links } = makeDeps({
+      ingest: () => void ingested.push(1),
+      askAgent: async () => {
+        throw new Error("boom");
+      },
+    });
+    links.set(502, { chatId: 502, tenantId: "tenant-1", linkedAt: "x" });
+
+    // #when the user messages and the agent call fails
+    await handleUpdate(msg(502, "remember this"), deps);
+
+    // #then the turn was still captured
+    expect(ingested).toHaveLength(1);
+  });
+});
+
 describe("handleUpdate — commands", () => {
   it("/status reflects connection state", async () => {
     const { deps, links, sent } = makeDeps();
