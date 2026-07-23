@@ -44,13 +44,15 @@ describe("createAgentSchema", () => {
     });
     expect(out.success).toBe(true);
   });
-  it("rejects cloudflare without an account id", () => {
+  it("accepts cloudflare without an account id (auto-detected from the token)", () => {
+    // #given a cloudflare body with a valid token but no account id
+    // #when validated — #then it passes; the API resolves the id from the token.
     const out = createAgentSchema.safeParse({
       name: "cf-agent",
       llmProvider: "cloudflare",
       llmKey: "cfut_FESiL4BfEYU8yf8Q2xXHoY8oOT0kPs66",
     });
-    expect(out.success).toBe(false);
+    expect(out.success).toBe(true);
   });
   it("rejects a malformed cloudflare account id", () => {
     const out = createAgentSchema.safeParse({

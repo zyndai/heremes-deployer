@@ -36,7 +36,9 @@ export const createAgentSchema = z
           message: "expected a Cloudflare API token (letters, digits, _ or -)",
         });
       }
-      if (!body.cfAccountId || !CF_ACCOUNT_ID_RE.test(body.cfAccountId)) {
+      // Account ID is optional — the API auto-detects it from the token. Only
+      // validate the format when the user did supply one.
+      if (body.cfAccountId && !CF_ACCOUNT_ID_RE.test(body.cfAccountId)) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["cfAccountId"],
