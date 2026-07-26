@@ -2,7 +2,6 @@
 
 import { useState, useEffect } from "react";
 import { StatusBadge } from "./StatusBadge";
-import { AgentTerminal } from "./AgentTerminal";
 import type { AgentView } from "./types";
 
 type Action = "start" | "stop" | "restart";
@@ -178,10 +177,6 @@ export function AgentCard({
       {(running || stopped || unhealthy) && (
         <TerminalLogs agentId={agent.id} />
       )}
-
-      {/* Live shell into the container — needs a worker (Docker) and a running
-          container to exec into. */}
-      {WORKER_ENABLED && running && <AgentTerminal agentId={agent.id} />}
     </div>
   );
 }
