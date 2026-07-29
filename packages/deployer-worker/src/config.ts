@@ -155,6 +155,15 @@ export const config = {
     "DEPLOYER_CF_DEFAULT_MODEL",
     "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
   ),
+
+  // Optional AI Gateway id. When set, cloudflare-provider agents are seeded to
+  // route Workers AI through the gateway's OpenAI-compat endpoint (enabling
+  // gateway spend limits + analytics) instead of the direct account endpoint.
+  // Empty (default) preserves the direct endpoint, so nothing changes until the
+  // env var is set on the worker. The gateway MUST have Authenticated Gateway
+  // OFF: the seeded provider only sends `Authorization: Bearer`, with no slot for
+  // the `cf-aig-authorization` header an authenticated gateway would require.
+  cfAiGateway: optional("DEPLOYER_CF_AI_GATEWAY", ""),
 };
 
 // Guard against an inverted/empty port range at boot — an allocator over an

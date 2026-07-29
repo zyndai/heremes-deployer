@@ -180,6 +180,22 @@ function providerKeyName(provider: LlmProvider): string {
   return provider === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENROUTER_API_KEY";
 }
 
+// Cloudflare Workers AI model id + base URL, kept consistent across the seeded
+// config.yaml (main chat path) and the HERMES_MODEL env (dashboard TUI path) —
+// they MUST agree or TUI chats send a model id the endpoint rejects. When
+// cfg.cfAiGateway is set, requests route through the AI Gateway's OpenAI-compat
+// endpoint, which requires the `workers-ai/` model prefix; the direct account
+// endpoint takes the bare `@cf/` id.
+function cloudflareModelId(): string {
+  return cfg.cfAiGateway ? `workers-ai/${cfg.cfDefaultModel}` : cfg.cfDefaultModel;
+}
+
+function cloudflareBaseUrl(accountId: string): string {
+  return cfg.cfAiGateway
+    ? `https://gateway.ai.cloudflare.com/v1/${accountId}/${cfg.cfAiGateway}/compat`
+    : `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1`;
+}
+
 export interface BuildAgentEnvOpts {
   secret: Record<string, string>;
   llmProvider: LlmProvider;
@@ -222,7 +238,7 @@ export function buildAgentEnv(opts: BuildAgentEnvOpts): Record<string, string> {
   // wrong endpoint (e.g. deepseek/* to Workers AI → 402 unified-billing error).
   const modelEnv =
     opts.llmProvider === "cloudflare"
-      ? { HERMES_MODEL: cfg.cfDefaultModel }
+      ? { HERMES_MODEL: cloudflareModelId() }
       : opts.llmProvider === "openrouter"
         ? { HERMES_MODEL: cfg.defaultModel }
         : {}; // anthropic: the image's own Anthropic default is correct
@@ -256,8 +272,15 @@ export function buildAgentEnv(opts: BuildAgentEnvOpts): Record<string, string> {
     // dashboard is already owner-gated at Caddy (forward_auth), so the gateway
     // is not the trust boundary. Without this, the web dashboard cannot chat.
     GATEWAY_ALLOW_ALL_USERS: "true",
-    // Dashboard's own OAuth is skipped; auth is enforced at Caddy (§5).
-    HERMES_DASHBOARD_INSECURE: "1",
+    // v>0.16.0: HERMES_DASHBOARD_INSECURE no longer disables the auth gate.
+    // The dashboard refuses to bind 0.0.0.0 without an auth provider. Gate is
+    // handled at Caddy (forward_auth / DEPLOYER_DASHBOARD_AUTH), so set a
+    // per-agent basic-auth credential derived from the API key — stable across
+    // redeploys, never surfaced to the owner. The Caddy gate is the real auth.
+    HERMES_DASHBOARD_BASIC_AUTH_USERNAME: "admin",
+    HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: createHash("sha256")
+      .update(`${apiServerKey}:dashboard-auth`)
+      .digest("hex"),
     // ZYND memory-layer credentials for a persona-linked agent. The token
     // authenticates the container's ingest tee and the config.yaml MCP server
     // (bearer-scoped to the owner's ZYND user). Present only after the owner
@@ -363,8 +386,8 @@ export function buildAgentConfigYaml(opts: {
     if (!accountId) {
       throw new Error("secret is missing CF_ACCOUNT_ID for provider cloudflare");
     }
-    const baseUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1`;
-    const model = cfg.cfDefaultModel;
+    const baseUrl = cloudflareBaseUrl(accountId);
+    const model = cloudflareModelId();
     return [
       "model:",
       "  provider: cloudflare",

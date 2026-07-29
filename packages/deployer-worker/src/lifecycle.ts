@@ -434,7 +434,14 @@ export async function drive(agentId: string): Promise<void> {
     // --- 4. register the Caddy route to the dashboard port -----------
     step = "registering_route";
     await setStatus(agentId, "registering_route");
-    await addRoute(agentId, agent.slug, dashboardPort);
+    const dashboardBasicAuth =
+      env.HERMES_DASHBOARD_BASIC_AUTH_USERNAME && env.HERMES_DASHBOARD_BASIC_AUTH_PASSWORD
+        ? {
+            username: env.HERMES_DASHBOARD_BASIC_AUTH_USERNAME,
+            password: env.HERMES_DASHBOARD_BASIC_AUTH_PASSWORD,
+          }
+        : undefined;
+    await addRoute(agentId, agent.slug, dashboardPort, dashboardBasicAuth);
     routeAdded = true;
     emitStep(agentId, "registering_route", "ok");
 
