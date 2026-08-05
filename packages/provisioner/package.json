@@ -13,7 +13,8 @@
     "./local": "./src/local/local-deps.ts",
     "./aws": "./src/clients.ts",
     "./supabase": "./src/supabase-store.ts",
-    "./dynamo": "./src/dynamo-store.ts"
+    "./dynamo": "./src/dynamo-store.ts",
+    "./version": "./src/version.ts"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
