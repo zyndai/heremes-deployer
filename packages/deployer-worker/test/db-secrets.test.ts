@@ -63,7 +63,8 @@ describe("db-secrets", () => {
     await writeSecret("agent-1", { OPENROUTER_API_KEY: "sk-or-xyz" });
     // flip a byte deep in the ciphertext region
     const buf = Buffer.from(store["agent-1"]!.secretBlob!, "base64");
-    buf[buf.length - 1] ^= 0xff;
+    const last = buf.length - 1;
+    buf[last] = (buf[last] ?? 0) ^ 0xff;
     store["agent-1"] = { secretBlob: buf.toString("base64") };
 
     await expect(readSecret("agent-1")).rejects.toThrow();

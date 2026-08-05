@@ -21,6 +21,7 @@
     "test:watch": "vitest",
     "worker:dev": "tsx watch bin/main.ts",
     "worker:start": "tsx bin/main.ts",
+    "agents:status": "tsx bin/agents-status.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "postinstall": "prisma generate"

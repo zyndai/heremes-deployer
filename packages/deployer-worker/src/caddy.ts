@@ -182,6 +182,7 @@ export async function addRoute(
   agentId: string,
   slug: string,
   dashboardPort: number,
+  dashboardBasicAuth?: { username: string; password: string },
 ): Promise<void> {
   if (cfg.skipCaddy) return;
 
@@ -191,10 +192,27 @@ export async function addRoute(
   // cert for the new subdomain on first request.
   if (cfg.agentSubdomainBase) {
     const host = `${slug}.${cfg.agentSubdomainBase}`;
-    const containerProxy: CaddyHandler = {
-      handler: "reverse_proxy",
-      upstreams: [{ dial: `127.0.0.1:${dashboardPort}` }],
-    };
+    // Inject Basic auth header so the owner never sees Hermes's own login screen.
+    // Caddy's forward_auth gate is the real auth boundary; these credentials are
+    // only used by Hermes to satisfy its v>0.16.0 requirement for an auth provider.
+    const containerProxy: CaddyHandler = dashboardBasicAuth
+      ? {
+          handler: "reverse_proxy",
+          upstreams: [{ dial: `127.0.0.1:${dashboardPort}` }],
+          headers: {
+            request: {
+              set: {
+                Authorization: [
+                  `Basic ${Buffer.from(`${dashboardBasicAuth.username}:${dashboardBasicAuth.password}`).toString("base64")}`,
+                ],
+              },
+            },
+          },
+        }
+      : {
+          handler: "reverse_proxy",
+          upstreams: [{ dial: `127.0.0.1:${dashboardPort}` }],
+        };
 
     if (!cfg.dashboardAuth) {
       await prependRoutes([

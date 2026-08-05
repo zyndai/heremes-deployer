@@ -208,6 +208,31 @@ export async function runContainer(opts: RunContainerOpts): Promise<string> {
 }
 
 /**
+ * Pull a Docker image by tag. Returns when the pull completes (or throws).
+ * dockerode surfaces auth errors / not-found as rejections, which the caller
+ * catches and surfaces to the UI. Streaming progress is logged but not
+ * exposed to the WS layer — the step frame alone is enough.
+ */
+export async function pullImage(image: string): Promise<void> {
+  console.log(`[docker] pullImage pulling ${image}`);
+  const stream = await docker.pull(image);
+  // dockerode pull() returns a raw stream. Drain it so the pull completes;
+  // failure inside the stream registers as an 'error' event.
+  await new Promise<void>((resolve, reject) => {
+    docker.modem.followProgress(
+      stream,
+      (err: Error | null) => (err ? reject(err) : resolve()),
+      (event: { status?: string; progress?: string; id?: string }) => {
+        if (event.id) {
+          console.log(`[docker] pullImage ${image}: ${event.status ?? ""} ${event.progress ?? ""}`.trim());
+        }
+      },
+    );
+  });
+  console.log(`[docker] pullImage ${image} complete`);
+}
+
+/**
  * Poll the freshly started container's API /health until it returns 200 or the
  * boot timeout elapses. Hermes has no entrypoint install step to wait on, so
  * this is the single readiness gate before the agent is marked running.

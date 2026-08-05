@@ -13,9 +13,11 @@ FROM ${HERMES_BASE}
 
 COPY patch-telegram-ua.py /tmp/patch-telegram-ua.py
 COPY patch-empty-assistant.py /tmp/patch-empty-assistant.py
+COPY patch-disable-auth.py /tmp/patch-disable-auth.py
 # Run as root for the in-place edit; the base image's own entrypoint drops to
 # HERMES_UID at runtime, so this doesn't change the runtime user.
 USER root
 RUN python3 /tmp/patch-telegram-ua.py /opt/hermes/hermes_cli/web_server.py \
     && python3 /tmp/patch-empty-assistant.py /opt/hermes/agent/agent_runtime_helpers.py \
-    && rm -f /tmp/patch-telegram-ua.py /tmp/patch-empty-assistant.py
+    && python3 /tmp/patch-disable-auth.py /opt/hermes/hermes_cli/web_server.py \
+    && rm -f /tmp/patch-telegram-ua.py /tmp/patch-empty-assistant.py /tmp/patch-disable-auth.py

@@ -11,16 +11,22 @@ export function Dashboard({
   initialAgents,
   userName,
   maxAgents,
+  notice,
 }: {
   initialAgents: AgentView[];
   userName: string;
   maxAgents: number;
+  notice?: { kind: "ok" | "error"; text: string } | null;
 }) {
   const [agents, setAgents] = useState<AgentView[]>(initialAgents);
   const [modalOpen, setModalOpen] = useState(false);
   const [deleting, setDeleting] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  // Dismissible one-shot banner for the Connect Zynd Persona round-trip result
+  // (?zynd=connected / ?zynd_error=...). Seeded from the server prop.
+  const [noticeShown, setNoticeShown] = useState(true);
   const atLimit = agents.length >= maxAgents;
+  const personaAgent = agents.find((a) => a.status === "running" && a.hostUrl) ?? null;
   const runningCount = agents.filter((agent) => agent.status === "running").length;
 
   // Ref lets the stable polling interval read the latest list without being a
@@ -77,6 +83,8 @@ export function Dashboard({
         status: string;
         hostUrl: string | null;
         personalityId?: string;
+        personaLinked: boolean;
+        hermesVersion?: string | null;
         createdAt: string;
       }>;
     };
@@ -88,6 +96,8 @@ export function Dashboard({
         status: a.status,
         hostUrl: a.hostUrl,
         ...(a.personalityId ? { personalityId: a.personalityId } : {}),
+        personaLinked: a.personaLinked,
+        hermesVersion: a.hermesVersion,
         createdAt: a.createdAt,
       })),
     );
@@ -137,6 +147,27 @@ export function Dashboard({
             </div>
           </div>
 
+          {personaAgent && (
+            <>
+              <div className="hidden sm:block w-px h-6 bg-panel-edge" />
+              <a
+                href={`/api/agents/${personaAgent.id}/zynd/connect`}
+                className={`hidden sm:flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-mono font-bold uppercase tracking-widest border transition ${
+                  personaAgent.personaLinked
+                    ? "border-panel-edge text-muted-2 hover:border-foreground hover:text-foreground"
+                    : "border-foreground text-foreground hover:bg-foreground hover:text-white"
+                }`}
+              >
+                {personaAgent.personaLinked ? (
+                  <span className="text-green text-[10px]">✓</span>
+                ) : (
+                  <span className="text-[10px]">⬡</span>
+                )}
+                <span>Zynd Memory</span>
+              </a>
+            </>
+          )}
+
           <div className="hidden sm:block w-px h-6 bg-panel-edge" />
 
           {/* User Profile */}
@@ -153,9 +184,27 @@ export function Dashboard({
         </div>
       </nav>
 
-      <div className="flex h-full w-full flex-col px-6 py-6 lg:px-8 relative z-10">
+      <div className="flex flex-1 min-h-0 w-full flex-col px-6 py-6 lg:px-8 relative z-10">
         {/* Main Content Area */}
         <div className="flex flex-1 flex-col overflow-hidden">
+
+          {notice && noticeShown && (
+            <div
+              className={`mb-6 shrink-0 inline-flex items-center gap-3 rounded-full border px-4 py-2 text-sm font-medium ${
+                notice.kind === "ok"
+                  ? "bg-green/10 border-green/20 text-green"
+                  : "bg-red/10 border-red/20 text-red"
+              }`}
+            >
+              <span>{notice.text}</span>
+              <button
+                onClick={() => setNoticeShown(false)}
+                className="text-xs uppercase tracking-widest opacity-70 hover:opacity-100"
+              >
+                Dismiss
+              </button>
+            </div>
+          )}
 
           {actionError && (
             <div className="mb-6 shrink-0 inline-flex items-center gap-3 rounded-full bg-red/10 border border-red/20 px-4 py-2 text-sm text-red font-medium">

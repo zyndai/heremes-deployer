@@ -1,7 +1,9 @@
 // Owner-only gate for the per-agent dashboard (spec §5, decision 1).
 //
-// The agent container serves its dashboard with HERMES_DASHBOARD_INSECURE=1 —
-// it does no auth of its own — so Caddy is the real boundary. Each agent route
+// The agent container is configured with HERMES_DASHBOARD_BASIC_AUTH_USERNAME/PASSWORD
+// (v>0.16.0 requires an auth provider). Caddy injects the Authorization header
+// transparently so the owner never sees the Hermes login screen. Caddy is still
+// the real trust boundary. Each agent route
 // runs a forward_auth subrequest to the worker before proxying to the
 // container; this module answers those subrequests.
 //

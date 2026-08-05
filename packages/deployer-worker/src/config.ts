@@ -44,6 +44,16 @@ export const config = {
   // boot the wrong (or a non-existent) image, so we fail fast at load.
   hermesImage: required("HERMES_IMAGE"),
 
+  // Image name without the tag (everything before the last ':'), used to
+  // build the target image during a version update. Derived from HERMES_IMAGE.
+  // e.g. "ghcr.io/zynd/hermes-agent:0.19.0" -> "ghcr.io/zynd/hermes-agent"
+  hermesImagePrefix: required("HERMES_IMAGE").replace(/:[^:]+$/, ""),
+
+  // Current Hermes agent version (the tag suffix of HERMES_IMAGE).
+  // e.g. "ghcr.io/zynd/hermes-agent:0.19.0" -> "0.19.0"
+  // Default agents get this version when first deployed.
+  hermesVersion: required("HERMES_IMAGE").split(":").pop() ?? "unknown",
+
   dataRoot,
   // Public host agents are reached on: https://<wildcardDomain>/<slug>. The
   // canonical var is HERMES_DOMAIN (the same one the Caddyfile + web app use);
@@ -149,9 +159,21 @@ export const config = {
 
   // Default model for agents on the cloudflare provider (Workers AI). Must be
   // a @cf/ model — partner-prefixed ids route to unified billing, which
-  // promo credits do not cover. gpt-oss-120b measured fastest with clean
-  // (non-reasoning) output of the large chat models (2026-06-11).
-  cfDefaultModel: optional("DEPLOYER_CF_DEFAULT_MODEL", "@cf/openai/gpt-oss-120b"),
+  // promo credits do not cover. llama-3.3-70b-fp8-fast: strong instruct model,
+  // fp8 "fast" variant, clean (non-reasoning) output (2026-07-03).
+  cfDefaultModel: optional(
+    "DEPLOYER_CF_DEFAULT_MODEL",
+    "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+  ),
+
+  // Optional AI Gateway id. When set, cloudflare-provider agents are seeded to
+  // route Workers AI through the gateway's OpenAI-compat endpoint (enabling
+  // gateway spend limits + analytics) instead of the direct account endpoint.
+  // Empty (default) preserves the direct endpoint, so nothing changes until the
+  // env var is set on the worker. The gateway MUST have Authenticated Gateway
+  // OFF: the seeded provider only sends `Authorization: Bearer`, with no slot for
+  // the `cf-aig-authorization` header an authenticated gateway would require.
+  cfAiGateway: optional("DEPLOYER_CF_AI_GATEWAY", ""),
 };
 
 // Guard against an inverted/empty port range at boot — an allocator over an

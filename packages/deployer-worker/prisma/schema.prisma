@@ -29,7 +29,7 @@ model Agent {
   slug          String   @unique                // slugify(name) + suffix
   tenantId      String   @unique                // `${userId}-${name}` (current convention)
 
-  status        String                          // queued|allocating_ports|starting|health_checking|registering_route|running|unhealthy|failed|stopped|crashed
+  status        String                          // queued|allocating_ports|starting|health_checking|registering_route|running|unhealthy|failed|stopped|crashed|updating
   errorMessage  String?
 
   llmProvider   String                          // "openrouter" | "anthropic"
@@ -39,6 +39,17 @@ model Agent {
   // (reader) share secrets over RDS — no `age` binary or shared disk needed.
   secretBlob    String?  @db.Text
   personalityId String?
+
+  // Zynd Persona / memory-layer link. Set true once the owner completes the
+  // "Connect Zynd Persona" OAuth flow; the per-agent ZYND memory token then
+  // rides secretBlob (key ZYND_MEMORY_TOKEN) and the worker wires the agent to
+  // ingest + query memory. Owner re-connects to rotate the token.
+  personaLinked Boolean  @default(false)
+
+  // Hermes agent version tracking. Set by the worker after a successful deploy
+  // or update; null means the agent was deployed before version tracking existed.
+  hermesVersion         String?                         // e.g. "v0.19.0"
+  targetHermesVersion   String?                         // set during update; cleared on completion
 
   apiPort       Int?                            // host port -> container 8642
   dashboardPort Int?                            // host port -> container 9119

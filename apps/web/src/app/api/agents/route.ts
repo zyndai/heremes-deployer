@@ -6,6 +6,7 @@ import { prisma } from "@/lib/db";
 import { ownerWhere, healStale } from "@/lib/ownership";
 import { writeSecret, generateApiKey } from "@/lib/secrets";
 import { mintWsToken } from "@/lib/ws-token";
+import { resolveCloudflareAccountId, CloudflareAccountError } from "@/lib/cloudflare";
 
 // age/Prisma + node crypto require the Node runtime, not the edge runtime.
 export const runtime = "nodejs";
@@ -35,6 +36,8 @@ export async function GET() {
       status: true,
       hostUrl: true,
       personalityId: true,
+      personaLinked: true,
+      hermesVersion: true,
       createdAt: true,
     },
   });
@@ -47,6 +50,8 @@ export async function GET() {
     status: a.status,
     hostUrl: a.hostUrl,
     personalityId: a.personalityId,
+    personaLinked: a.personaLinked,
+    hermesVersion: a.hermesVersion,
     createdAt: a.createdAt,
   }));
   return NextResponse.json({ agents });
@@ -64,6 +69,22 @@ export async function POST(req: Request) {
     );
   }
   const body = parsed.data;
+
+  // Cloudflare agents need an account id (the Workers AI endpoint URL embeds it).
+  // If the user didn't paste one, auto-detect it from their token. Do this before
+  // creating the row so a detection failure returns a clean 400 with no orphan.
+  let cfAccountId = body.cfAccountId;
+  if (body.llmProvider === "cloudflare" && !cfAccountId) {
+    try {
+      cfAccountId = await resolveCloudflareAccountId(body.llmKey);
+    } catch (err) {
+      if (err instanceof CloudflareAccountError) {
+        return NextResponse.json({ error: err.message }, { status: 400 });
+      }
+      throw err;
+    }
+  }
+
   const slug = uniqueSlug(body.name);
   const tenantId = `${user.id}-${body.name}`;
 
@@ -97,8 +118,8 @@ export async function POST(req: Request) {
     const secretRef = await writeSecret(agent.id, {
       API_SERVER_KEY: generateApiKey(),
       [PROVIDER_TO_ENV[body.llmProvider]]: body.llmKey,
-      ...(body.llmProvider === "cloudflare" && body.cfAccountId
-        ? { CF_ACCOUNT_ID: body.cfAccountId }
+      ...(body.llmProvider === "cloudflare" && cfAccountId
+        ? { CF_ACCOUNT_ID: cfAccountId }
         : {}),
     });
     await prisma.agent.update({ where: { id: agent.id }, data: { secretRef } });

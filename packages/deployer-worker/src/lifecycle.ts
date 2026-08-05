@@ -7,15 +7,22 @@
 //   - DB status is written FIRST, then emitStep — so a reconnecting socket
 //     can backfill the current step from the row (DB = source of truth).
 
-import { mkdir, chown, chmod, stat, writeFile } from "node:fs/promises";
+import { mkdir, chown, chmod, stat, writeFile, readFile } from "node:fs/promises";
 
 import { prisma } from "./db";
 import { config, paths, HERMES_UID, HERMES_GID } from "./config";
 import { allocatePort, releasePort } from "./ports";
-import { runContainer, stopAndRemove, waitForHealth } from "./docker";
+import { runContainer, stopAndRemove, waitForHealth, pullImage } from "./docker";
 import { addRoute, removeRoute } from "./caddy";
 import { readSecret } from "./db-secrets";
-import { buildAgentEnv, buildAgentConfigYaml, type LlmProvider } from "./secrets";
+import {
+  buildAgentEnv,
+  buildAgentConfigYaml,
+  buildZyndMcpBlock,
+  mergeZyndMcpBlock,
+  DEFAULT_ZYND_MEMORY_URL,
+  type LlmProvider,
+} from "./secrets";
 import { startTailer, stopTailer, appendSystemLog } from "./logs";
 import { emitStep, emitReady, emitDone, type StepName } from "./events";
 
@@ -29,7 +36,8 @@ export type AgentStatus =
   | "unhealthy"
   | "failed"
   | "stopped"
-  | "crashed";
+  | "crashed"
+  | "updating";
 
 interface AgentRow {
   id: string;
@@ -42,6 +50,8 @@ interface AgentRow {
   apiPort?: number | null;
   dashboardPort?: number | null;
   containerId?: string | null;
+  hermesVersion?: string | null;
+  targetHermesVersion?: string | null;
 }
 
 const ACTIVE_STATUSES: ReadonlyArray<string> = [
@@ -52,6 +62,7 @@ const ACTIVE_STATUSES: ReadonlyArray<string> = [
   "registering_route",
   "running",
   "unhealthy",
+  "updating",
 ];
 
 function buildHostUrl(slug: string, dashboardPort: number): string {
@@ -165,16 +176,83 @@ async function seedConfigYaml(dataDir: string, yaml: string, agentId: string): P
     if (code !== "ENOENT") throw e;
   }
 
-  await writeFile(configPath, yaml, { mode: 0o660 });
+  await writeAgentConfigFile(configPath, yaml);
+  await appendSystemLog(agentId, "[worker] seeded config.yaml (model/provider)").catch(
+    () => undefined,
+  );
+}
+
+/**
+ * Write config.yaml with the shared 0660 perms + group ownership so the
+ * container uid (via HERMES_GID) can read AND rewrite it. Root chowns owner+gid;
+ * a non-root worker in HERMES_GID can only set the group, which is enough.
+ */
+async function writeAgentConfigFile(configPath: string, content: string): Promise<void> {
+  await writeFile(configPath, content, { mode: 0o660 });
   try {
     await chown(configPath, HERMES_UID, HERMES_GID);
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
     if (code !== "EPERM" && code !== "ENOSYS") throw e;
-    // Non-root worker: owner stays the worker user; group share is enough.
     await chown(configPath, -1, HERMES_GID);
   }
-  await appendSystemLog(agentId, "[worker] seeded config.yaml (model/provider)").catch(
+}
+
+/**
+ * Merge (or refresh) the ZYND mcp_servers block into an EXISTING config.yaml so
+ * a persona-linked agent can recall memory. Unlike seedConfigYaml (fresh dirs
+ * only), this runs on every deploy of a linked agent so a rotated token is
+ * picked up.
+ *
+ * Best-effort by design: if the gateway sealed config.yaml to the container uid
+ * (0700) on a prior boot and this worker is non-root, the file is unreadable —
+ * we log and skip rather than fail the deploy. A root worker (prod systemd) or a
+ * freshly recreated agent wires it cleanly.
+ */
+async function ensureZyndMcpConfig(
+  dataDir: string,
+  memoryUrl: string,
+  token: string,
+  agentId: string,
+): Promise<void> {
+  const configPath = `${dataDir}/config.yaml`;
+  const block = buildZyndMcpBlock(memoryUrl, token);
+
+  let existing: string;
+  try {
+    existing = await readFile(configPath, "utf8");
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") {
+      // No seed file (e.g. the anthropic provider seeds nothing) — create one
+      // holding just our block.
+      await writeAgentConfigFile(configPath, block);
+      await appendSystemLog(agentId, "[worker] wrote ZYND MCP config.yaml").catch(() => undefined);
+      return;
+    }
+    if (code === "EACCES" || code === "EPERM") {
+      await appendSystemLog(
+        agentId,
+        "[worker] config.yaml is sealed to the container uid; ZYND MCP recall not wired " +
+          "(run the worker as root or recreate the agent to enable it)",
+      ).catch(() => undefined);
+      return;
+    }
+    throw e;
+  }
+
+  const next = mergeZyndMcpBlock(existing, block);
+  if (next === null) {
+    await appendSystemLog(
+      agentId,
+      "[worker] config.yaml already defines mcp_servers outside our region; " +
+        "leaving ZYND MCP unmanaged to avoid a duplicate key",
+    ).catch(() => undefined);
+    return;
+  }
+  if (next === existing) return; // already current (same token)
+  await writeAgentConfigFile(configPath, next);
+  await appendSystemLog(agentId, "[worker] merged ZYND MCP config into config.yaml").catch(
     () => undefined,
   );
 }
@@ -320,6 +398,20 @@ export async function drive(agentId: string): Promise<void> {
     });
     if (seedYaml) await seedConfigYaml(dataDir, seedYaml, agentId);
 
+    // Persona-linked agent: merge the ZYND memory MCP server into config.yaml so
+    // the agent can recall the owner's memory. Runs every deploy (idempotent) so
+    // a reconnect rotates the token. Best-effort — never fails the deploy.
+    const zyndToken = secret.ZYND_MEMORY_TOKEN;
+    if (zyndToken) {
+      const memoryUrl = secret.ZYND_MEMORY_URL || DEFAULT_ZYND_MEMORY_URL;
+      await ensureZyndMcpConfig(dataDir, memoryUrl, zyndToken, agentId).catch((err) =>
+        appendSystemLog(
+          agentId,
+          `[worker] ZYND MCP config skipped: ${scrubError((err as Error).message, secretValues)}`,
+        ).catch(() => undefined),
+      );
+    }
+
     containerId = await runContainer({
       agentId,
       apiPort,
@@ -346,7 +438,14 @@ export async function drive(agentId: string): Promise<void> {
     // --- 4. register the Caddy route to the dashboard port -----------
     step = "registering_route";
     await setStatus(agentId, "registering_route");
-    await addRoute(agentId, agent.slug, dashboardPort);
+    const dashboardBasicAuth =
+      env.HERMES_DASHBOARD_BASIC_AUTH_USERNAME && env.HERMES_DASHBOARD_BASIC_AUTH_PASSWORD
+        ? {
+            username: env.HERMES_DASHBOARD_BASIC_AUTH_USERNAME,
+            password: env.HERMES_DASHBOARD_BASIC_AUTH_PASSWORD,
+          }
+        : undefined;
+    await addRoute(agentId, agent.slug, dashboardPort, dashboardBasicAuth);
     routeAdded = true;
     emitStep(agentId, "registering_route", "ok");
 
@@ -354,7 +453,14 @@ export async function drive(agentId: string): Promise<void> {
     const hostUrl = buildHostUrl(agent.slug, dashboardPort);
     await prisma.agent.update({
       where: { id: agentId },
-      data: { status: "running", hostUrl },
+      data: {
+        status: "running",
+        hostUrl,
+        // Set version on first deploy (null-safe: won't overwrite a post-update version).
+        ...(agent.hermesVersion == null
+          ? { hermesVersion: config.hermesVersion }
+          : {}),
+      },
     });
     emitStep(agentId, "running", "ok");
     emitReady(agentId, hostUrl);
@@ -421,4 +527,180 @@ export async function controlAgent(
     data: { status: "queued", containerId: null, apiPort: null, dashboardPort: null },
   });
   await drive(agentId);
+}
+
+/**
+ * Update an agent's Hermes version in-place. The bind-mounted dataDir preserves
+ * all user data (config.yaml, sessions, bot tokens, MCP configs, cron jobs,
+ * automations) across the container swap — no backup copy needed.
+ *
+ * Steps (streamed via events):
+ *   1. pulling_image    — docker pull <imagePrefix>:<targetVersion>
+ *   2. creating_backup  — verify dataDir exists + has content (no-op; bind mount IS persistence)
+ *   3. stopping_container — stop + remove the old container
+ *   4. starting_updated — create + start new container with SAME ports/volume/env, NEW image
+ *   5. health_checking  — poll /health until 200
+ *   6. running          — mark status=running, update hermesVersion
+ */
+export async function updateAgent(agentId: string): Promise<void> {
+  const agent = (await prisma.agent.findUnique({
+    where: { id: agentId },
+    select: {
+      id: true,
+      userId: true,
+      slug: true,
+      status: true,
+      llmProvider: true,
+      secretRef: true,
+      personalityId: true,
+      apiPort: true,
+      dashboardPort: true,
+      containerId: true,
+      targetHermesVersion: true,
+    },
+  })) as (AgentRow & { targetHermesVersion?: string | null }) | null;
+
+  if (!agent || agent.status !== "updating") return;
+  const targetVersion = agent.targetHermesVersion;
+  if (!targetVersion) {
+    await failDeployment(agentId, "pulling_image", "no target version set", async () => {});
+    return;
+  }
+
+  const targetImage = `${config.hermesImagePrefix}:${targetVersion}`;
+
+  let step: StepName = "pulling_image";
+  const secretValues: string[] = [];
+
+  try {
+    // --- 1. pull the new image ---------------------------------------
+    step = "pulling_image";
+    await setStatus(agentId, "updating");
+    emitStep(agentId, "pulling_image", "ok");
+    await appendSystemLog(agentId, `[worker] pulling ${targetImage} ...`).catch(() => undefined);
+
+    try {
+      await pullImage(targetImage);
+    } catch (e) {
+      const msg = scrubError((e as Error).message, secretValues);
+      throw new Error(`image pull failed: ${msg}`);
+    }
+    emitStep(agentId, "pulling_image", "ok");
+    await appendSystemLog(agentId, `[worker] pulled ${targetImage}`).catch(() => undefined);
+
+    // --- 2. verify data persistence (bind mount is the backup) -------
+    step = "creating_backup";
+    emitStep(agentId, "creating_backup", "ok");
+    const dataDir = paths.agentData(agentId);
+    try {
+      await stat(dataDir);
+      await appendSystemLog(agentId, `[worker] data dir ${dataDir} verified (bind mount preserves all data)`).catch(() => undefined);
+    } catch (e) {
+      // Data dir missing — this would mean data loss. Fail loudly.
+      throw new Error(`data dir ${dataDir} not found — refusing to update (possible data loss)`);
+    }
+    emitStep(agentId, "creating_backup", "ok");
+
+    // --- 3. stop the old container -----------------------------------
+    step = "stopping_container";
+    emitStep(agentId, "stopping_container", "ok");
+    if (agent.containerId) {
+      await stopAndRemove(agent.containerId);
+      await appendSystemLog(agentId, `[worker] stopped old container ${agent.containerId.slice(0, 12)}`).catch(() => undefined);
+    }
+    emitStep(agentId, "stopping_container", "ok");
+
+    // --- 4. start the new container ----------------------------------
+    step = "starting_updated";
+    emitStep(agentId, "starting_updated", "ok");
+    const secret = await readSecret(agentId);
+    secretValues.push(...Object.values(secret).filter((v): v is string => typeof v === "string"));
+    const env = buildAgentEnv({
+      secret,
+      llmProvider: agent.llmProvider as LlmProvider,
+      ...(agent.personalityId ? { personalityId: agent.personalityId } : {}),
+    });
+
+    const apiPort = agent.apiPort!;
+    const dashboardPort = agent.dashboardPort!;
+
+    const containerId = await runContainer({
+      agentId,
+      apiPort,
+      dashboardPort,
+      image: targetImage,
+      env,
+      dataDir,
+    });
+
+    await prisma.agent.update({
+      where: { id: agentId },
+      data: { containerId, startedAt: new Date() },
+    });
+    await appendSystemLog(agentId, `[worker] started updated container ${containerId.slice(0, 12)} (${targetImage})`);
+    await startTailer(agentId, containerId).catch(() => undefined);
+    emitStep(agentId, "starting_updated", "ok");
+
+    // --- 5. health check ---------------------------------------------
+    step = "health_checking";
+    emitStep(agentId, "health_checking", "ok");
+    await waitForHealth(apiPort);
+    emitStep(agentId, "health_checking", "ok");
+
+    // --- 6. mark running, update version -----------------------------
+    const hostUrl = buildHostUrl(agent.slug, dashboardPort);
+    await prisma.agent.update({
+      where: { id: agentId },
+      data: {
+        status: "running",
+        hostUrl,
+        hermesVersion: targetVersion,
+        targetHermesVersion: null,
+      },
+    });
+    emitStep(agentId, "running", "ok");
+    emitStep(agentId, "updating_complete", "ok");
+    emitReady(agentId, hostUrl);
+    await appendSystemLog(agentId, `[worker] updated to ${targetVersion}, live at ${hostUrl}`);
+
+    // Pre-warm TLS
+    if (hostUrl.startsWith("https://")) {
+      void fetch(hostUrl, { method: "HEAD", signal: AbortSignal.timeout(20_000) }).catch(() => undefined);
+    }
+  } catch (e) {
+    const msg = scrubError((e as Error).message, secretValues);
+    await failDeployment(agentId, step, msg, async () => {
+      if (agent.containerId) await stopAndRemove(agent.containerId).catch(() => undefined);
+    });
+  }
+}
+
+/**
+ * Sweep the next `updating` agent — called every tick from main.ts.
+ * Mirrors drainQueue's pattern: find oldest, claim with pessimistic update,
+ * run updateAgent synchronously.
+ */
+export async function drainUpdates(): Promise<void> {
+  const candidate = await prisma.agent.findFirst({
+    where: { status: "updating", targetHermesVersion: { not: null } },
+    orderBy: { createdAt: "asc" },
+    select: { id: true },
+  });
+  if (!candidate) return;
+
+  // Claim it (pessimistic lock: mark as updating again — idempotent).
+  const claimed = await prisma.agent.updateMany({
+    where: { id: candidate.id, status: "updating", targetHermesVersion: { not: null } },
+    data: { status: "updating" },
+  });
+  if (claimed.count === 0) return;
+
+  console.log(`[worker] drainUpdates claiming agent=${candidate.id} for version update`);
+  const t0 = Date.now();
+  try {
+    await updateAgent(candidate.id);
+    console.log(`[worker] updateAgent(${candidate.id}) finished in ${Date.now() - t0}ms`);
+  } catch (e) {
+    console.error(`[worker] updateAgent(${candidate.id}) threw after ${Date.now() - t0}ms:`, e);
+  }
 }

@@ -164,6 +164,11 @@ export function generateApiKey(): string {
 
 export type LlmProvider = "openrouter" | "anthropic" | "cloudflare";
 
+// Default ZYND memory-layer origin, used when the per-agent secret does not pin
+// one (secret.ZYND_MEMORY_URL). The deployer web writes the URL it used for the
+// OAuth exchange, so this is only a fallback for older/hand-seeded secrets.
+export const DEFAULT_ZYND_MEMORY_URL = "https://api.zynd.ai";
+
 // Provider -> the env var the Hermes image reads its LLM key from.
 // anthropic uses the native ANTHROPIC_API_KEY; everything else routes
 // through OpenRouter (spec §4).
@@ -173,6 +178,22 @@ function providerKeyName(provider: LlmProvider): string {
   // config.yaml's key_env names the same var — one name end to end.
   if (provider === "cloudflare") return "CLOUDFLARE_API_KEY";
   return provider === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENROUTER_API_KEY";
+}
+
+// Cloudflare Workers AI model id + base URL, kept consistent across the seeded
+// config.yaml (main chat path) and the HERMES_MODEL env (dashboard TUI path) —
+// they MUST agree or TUI chats send a model id the endpoint rejects. When
+// cfg.cfAiGateway is set, requests route through the AI Gateway's OpenAI-compat
+// endpoint, which requires the `workers-ai/` model prefix; the direct account
+// endpoint takes the bare `@cf/` id.
+function cloudflareModelId(): string {
+  return cfg.cfAiGateway ? `workers-ai/${cfg.cfDefaultModel}` : cfg.cfDefaultModel;
+}
+
+function cloudflareBaseUrl(accountId: string): string {
+  return cfg.cfAiGateway
+    ? `https://gateway.ai.cloudflare.com/v1/${accountId}/${cfg.cfAiGateway}/compat`
+    : `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1`;
 }
 
 export interface BuildAgentEnvOpts {
@@ -217,7 +238,7 @@ export function buildAgentEnv(opts: BuildAgentEnvOpts): Record<string, string> {
   // wrong endpoint (e.g. deepseek/* to Workers AI → 402 unified-billing error).
   const modelEnv =
     opts.llmProvider === "cloudflare"
-      ? { HERMES_MODEL: cfg.cfDefaultModel }
+      ? { HERMES_MODEL: cloudflareModelId() }
       : opts.llmProvider === "openrouter"
         ? { HERMES_MODEL: cfg.defaultModel }
         : {}; // anthropic: the image's own Anthropic default is correct
@@ -251,8 +272,25 @@ export function buildAgentEnv(opts: BuildAgentEnvOpts): Record<string, string> {
     // dashboard is already owner-gated at Caddy (forward_auth), so the gateway
     // is not the trust boundary. Without this, the web dashboard cannot chat.
     GATEWAY_ALLOW_ALL_USERS: "true",
-    // Dashboard's own OAuth is skipped; auth is enforced at Caddy (§5).
-    HERMES_DASHBOARD_INSECURE: "1",
+    // v>0.16.0: HERMES_DASHBOARD_INSECURE no longer disables the auth gate.
+    // The dashboard refuses to bind 0.0.0.0 without an auth provider. Gate is
+    // handled at Caddy (forward_auth / DEPLOYER_DASHBOARD_AUTH), so set a
+    // per-agent basic-auth credential derived from the API key — stable across
+    // redeploys, never surfaced to the owner. The Caddy gate is the real auth.
+    HERMES_DASHBOARD_BASIC_AUTH_USERNAME: "admin",
+    HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: createHash("sha256")
+      .update(`${apiServerKey}:dashboard-auth`)
+      .digest("hex"),
+    // ZYND memory-layer credentials for a persona-linked agent. The token
+    // authenticates the container's ingest tee and the config.yaml MCP server
+    // (bearer-scoped to the owner's ZYND user). Present only after the owner
+    // completes "Connect Zynd Persona"; absent for unlinked agents.
+    ...(opts.secret.ZYND_MEMORY_TOKEN
+      ? {
+          ZYND_MEMORY_TOKEN: opts.secret.ZYND_MEMORY_TOKEN,
+          ZYND_MEMORY_URL: opts.secret.ZYND_MEMORY_URL || DEFAULT_ZYND_MEMORY_URL,
+        }
+      : {}),
     // Spread last so a preset model override wins over the default.
     ...personalityEnv(opts.personalityId),
   };
@@ -262,6 +300,64 @@ export function buildAgentEnv(opts: BuildAgentEnvOpts): Record<string, string> {
 // embeds operator/user-supplied values (model ids, account ids) in the seed.
 function yamlQuote(value: string): string {
   return JSON.stringify(value);
+}
+
+// Marker-delimited region so the worker owns EXACTLY this slice of config.yaml
+// and can rewrite it idempotently (token rotation on reconnect) without
+// disturbing the gateway's own keys or operator edits. See ensureZyndMcpConfig.
+export const ZYND_MCP_BEGIN = "# >>> zynd mcp (managed by hermes-deployer — edits overwritten)";
+export const ZYND_MCP_END = "# <<< zynd mcp";
+
+/**
+ * The `mcp_servers.zynd` block that wires the agent to the memory-layer MCP
+ * server (remember + get_my_context tools), authenticated with the owner's ZYND
+ * token. The token VALUE is inlined (not a `${ENV}` ref) so it works regardless
+ * of whether the pinned Hermes image interpolates env vars inside config.yaml —
+ * an unverified upstream behavior. This matches the existing threat model: the
+ * bind dir already stores the Telegram bot token in plaintext at /opt/data/.env
+ * and is 0700/0770 (worker + container uid only).
+ *
+ * ASSUMPTION (verify against the pinned image): Hermes reads a top-level
+ * `mcp_servers:` map of {name: {url, headers}} and auto-registers its tools.
+ */
+export function buildZyndMcpBlock(memoryUrl: string, token: string): string {
+  const base = memoryUrl.replace(/\/+$/, "");
+  return [
+    ZYND_MCP_BEGIN,
+    "mcp_servers:",
+    "  zynd:",
+    `    url: ${yamlQuote(`${base}/mcp`)}`,
+    "    headers:",
+    `      Authorization: ${yamlQuote(`Bearer ${token}`)}`,
+    ZYND_MCP_END,
+    "",
+  ].join("\n");
+}
+
+/**
+ * Splice `block` into an existing config.yaml, replacing any prior managed
+ * region so a rotated token is refreshed. Pure (no I/O) for testability.
+ *
+ * Returns the new file contents, or `null` when merging is unsafe — a foreign
+ * top-level `mcp_servers:` already exists outside our markers, so appending
+ * ours would create a duplicate YAML key. Returns the input unchanged when the
+ * block is already present with the same token (caller skips the write).
+ */
+export function mergeZyndMcpBlock(existing: string, block: string): string | null {
+  const begin = existing.indexOf(ZYND_MCP_BEGIN);
+  if (begin !== -1) {
+    const endIdx = existing.indexOf(ZYND_MCP_END, begin);
+    if (endIdx === -1) {
+      // Truncated/corrupt managed region — replace from the marker to EOF.
+      return existing.slice(0, begin).trimEnd() + "\n\n" + block;
+    }
+    const after = existing.slice(endIdx + ZYND_MCP_END.length);
+    return existing.slice(0, begin) + block.trimEnd() + after;
+  }
+  // A foreign top-level mcp_servers key means we must not append our own.
+  if (/^mcp_servers:/m.test(existing)) return null;
+  const trimmed = existing.trimEnd();
+  return (trimmed ? trimmed + "\n\n" : "") + block;
 }
 
 /**
@@ -290,8 +386,8 @@ export function buildAgentConfigYaml(opts: {
     if (!accountId) {
       throw new Error("secret is missing CF_ACCOUNT_ID for provider cloudflare");
     }
-    const baseUrl = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1`;
-    const model = cfg.cfDefaultModel;
+    const baseUrl = cloudflareBaseUrl(accountId);
+    const model = cloudflareModelId();
     return [
       "model:",
       "  provider: cloudflare",

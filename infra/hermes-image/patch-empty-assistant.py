@@ -26,15 +26,21 @@ import sys
 
 MARKER = "UA patch: drop empty assistant turns"
 
-NEEDLE = "    messages = filtered\n\n    surviving_call_ids: set = set()"
+# Upstream v>0.16.0 added repair_empty_non_final_messages which heals
+# non-final empty turns with a placeholder. Insert our drop pass AFTER
+# that healing so it catches any remaining empty assistant turns
+# (e.g. final empty turns that upstream leaves untouched).
+NEEDLE = "    messages = repair_empty_non_final_messages(messages)\n\n    # --- Drop empty / malformed tool_calls arrays on assistant messages ---"
 
-REPLACEMENT = '''    messages = filtered
+REPLACEMENT = '''    messages = repair_empty_non_final_messages(messages)
 
     # UA patch: drop empty assistant turns (no text, no tool_calls) before any
     # LLM call. The cron loop can leave a trailing empty assistant message in
     # history; re-sending it makes strict providers fail every retry (Cloudflare
     # Mistral 400 "content=''", Llama 413, gpt-oss "No reply"). Tool-call turns
-    # legitimately have empty content and are preserved.
+    # legitimately have empty content and are preserved. This runs after
+    # repair_empty_non_final_messages (which heals mid-transcript empty messages
+    # with a placeholder) so we only drop what upstream intentionally left alone.
     def _ua_assistant_is_empty(_m):
         if _m.get("role") != "assistant":
             return False
@@ -63,7 +69,7 @@ REPLACEMENT = '''    messages = filtered
             _ua_before - len(messages),
         )
 
-    surviving_call_ids: set = set()'''
+    # --- Drop empty / malformed tool_calls arrays on assistant messages ---'''
 
 path = sys.argv[1] if len(sys.argv) > 1 else "/opt/hermes/agent/agent_runtime_helpers.py"
 

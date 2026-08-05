@@ -53,7 +53,7 @@ export function CreateAgentModal({
           name,
           llmProvider,
           llmKey,
-          ...(llmProvider === "cloudflare" ? { cfAccountId } : {}),
+          ...(llmProvider === "cloudflare" && cfAccountId ? { cfAccountId } : {}),
         }),
       });
       const data = await res.json();
@@ -124,16 +124,17 @@ export function CreateAgentModal({
             {llmProvider === "cloudflare" && (
               <>
                 <label className="mt-5 block text-sm font-bold uppercase tracking-widest text-foreground">
-                  Cloudflare account ID
+                  Cloudflare account ID <span className="text-muted-2">(optional)</span>
                 </label>
                 <input
                   value={cfAccountId}
                   onChange={(e) => setCfAccountId(e.target.value.trim())}
-                  placeholder="32-character hex id from the dashboard"
+                  placeholder="Auto-detected from your token"
                   className={INPUT}
                 />
                 <p className="mt-2 text-xs text-muted-2">
-                  Cloudflare dashboard → your account → Account ID.
+                  Leave blank — we detect it from your token. Only needed if
+                  detection fails (dashboard → your account → Account ID).
                 </p>
               </>
             )}

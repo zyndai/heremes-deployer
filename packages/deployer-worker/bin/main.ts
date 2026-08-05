@@ -3,15 +3,18 @@
 // (zynd-deployer). Each 1s tick:
 //   1. drainQueue — claim the oldest `queued` agent (the updateMany to
 //      `allocating_ports` IS the pessimistic lock) and drive it.
-//   2. drainStops — sweep agents the API flipped to `stopped`: tear down
+//   2. drainUpdates — sweep agents the API flipped to `updating`: pull new
+//      image, stop old container, start new with same volume/ports, health
+//      check, mark running with updated version.
+//   3. drainStops — sweep agents the API flipped to `stopped`: tear down
 //      container + Caddy route + ports, then clear the columns.
-//   3. drainDeletes — sweep agents the API flipped to `deleting` ("Clean up"):
+//   4. drainDeletes — sweep agents the API flipped to `deleting` ("Clean up"):
 //      same teardown, then delete the row so the card leaves the list.
 // The crash watcher, health/metrics/retention loops, and the deploy WS
 // server are started once at boot.
 
 import { prisma } from "../src/db";
-import { drive } from "../src/lifecycle";
+import { drive, drainUpdates } from "../src/lifecycle";
 import { watchCrashes } from "../src/crash";
 import { stopAndRemove } from "../src/docker";
 import { ensureServer, addRoute, removeRoute } from "../src/caddy";
@@ -218,6 +221,7 @@ export async function main(): Promise<void> {
   while (true) {
     try {
       await drainQueue();
+      await drainUpdates();
       await drainStops();
       await drainDeletes();
     } catch (e) {
