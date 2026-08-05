@@ -6,6 +6,7 @@ export { AgentStore } from "./store";
 export { CHANNELS, LLM_PROVIDERS } from "./types";
 export type { Channel, LlmProvider, ProvisionInput, AgentRecord } from "./types";
 export { buildLocalProvisionDeps, buildLocalTeardownDeps, type LocalProvisionDeps, type LocalPorts } from "./local/local-deps";
+export { updateAwsAgent, type UpdateInput, type UpdateResult } from "./update-aws";
 export {
   DockerUnavailableError, PortUnavailableError, containerIsRunning,
   startContainer, stopContainer, restartContainer, containerLogs,

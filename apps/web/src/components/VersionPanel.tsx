@@ -297,9 +297,13 @@ export function VersionPanel({ agent }: { agent: AgentView }) {
               Update Hermes
             </button>
           </div>
-        ) : (
+        ) : versionInfo?.current ? (
           <p className="mt-3 text-[10px] font-mono uppercase tracking-widest text-green">
             ✓ You&apos;re running the latest version.
+          </p>
+        ) : (
+          <p className="mt-3 text-[10px] font-mono uppercase tracking-widest text-muted-2">
+            Version unknown — agent was deployed before version tracking.
           </p>
         )}
       </div>

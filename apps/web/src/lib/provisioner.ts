@@ -1,6 +1,7 @@
 import {
   provisionAgent,
   teardownAgent,
+  updateAwsAgent,
   buildLocalProvisionDeps,
   buildLocalTeardownDeps,
   loadLocalConfig,
@@ -11,6 +12,8 @@ import {
   restartContainer,
   containerLogs,
   type ProvisionInput,
+  type UpdateInput,
+  type UpdateResult,
 } from "@hermes/provisioner";
 import { buildAwsPublicProvisionDeps, buildAwsPublicTeardownDeps } from "@hermes/provisioner/aws";
 import type { CreateAgentBody } from "./validation";
@@ -122,6 +125,47 @@ async function withLiveStatus(agent: OwnedAgent): Promise<OwnedAgent> {
 export async function getAgent(userId: string, tenantId: string): Promise<OwnedAgent | undefined> {
   const agent = await getOwned(userId, tenantId);
   return agent ? withLiveStatus(agent) : undefined;
+}
+
+export async function updateAgentVersion(
+  userId: string,
+  tenantId: string,
+  targetImage: string,
+): Promise<UpdateResult> {
+  if (!IS_AWS) throw new Error("updateAgentVersion is only available on the AWS runtime");
+
+  const record = await getOwned(userId, tenantId);
+  if (!record) throw new AgentNotFoundError();
+  if (!record.taskArn || !record.taskDefArn || !record.accessPointId || !record.securityGroupId) {
+    throw new Error("agent record is missing ECS details — cannot update");
+  }
+
+  const input: UpdateInput = {
+    tenantId,
+    targetImage,
+    taskArn: record.taskArn,
+    taskDefArn: record.taskDefArn,
+    accessPointId: record.accessPointId,
+    securityGroupId: record.securityGroupId,
+    ...(record.targetGroupArn &&
+    record.targetGroupArn !== "no-alb" &&
+    record.listenerRuleArn
+      ? { targetGroupArn: record.targetGroupArn, listenerRuleArn: record.listenerRuleArn }
+      : {}),
+  };
+
+  const result = await updateAwsAgent(input);
+
+  // Update the DynamoDB agent record with the new task details.
+  const updated: OwnedAgent = {
+    ...record,
+    status: "running",
+    taskArn: result.taskArn,
+    taskDefArn: result.taskDefArn,
+  };
+  await putOwned(updated);
+
+  return result;
 }
 
 export async function listAgents(userId: string): Promise<OwnedAgent[]> {

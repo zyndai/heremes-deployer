@@ -74,6 +74,10 @@ export async function GET(_req: Request, { params }: { params: Promise<{ id: str
     latest: latest?.version ?? null,
     releaseDate: latest?.releaseDate ?? null,
     changelogUrl: latest?.changelogUrl ?? null,
-    updateAvailable: latest != null && agent.hermesVersion != null && agent.hermesVersion !== latest.version,
+    // Update is available when: there's a latest release, and either the agent
+    // has no recorded version (was deployed before tracking existed) or the
+    // recorded version differs from latest.
+    updateAvailable:
+      latest != null && (agent.hermesVersion == null || agent.hermesVersion !== latest.version),
   });
 }

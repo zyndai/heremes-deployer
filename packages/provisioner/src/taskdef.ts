@@ -14,6 +14,8 @@ const VOLUME_NAME = "hermes-data";
 export interface TaskDefInput {
   accessPointId: string;
   secretRefs: SecretRef[];
+  /** Override the default hermesImage from config. Used for version updates. */
+  imageOverride?: string;
 }
 
 export async function registerTaskDef(
@@ -22,6 +24,7 @@ export async function registerTaskDef(
   tenantId: string,
   input: TaskDefInput,
 ): Promise<string> {
+  const image = input.imageOverride ?? cfg.hermesImage;
   const out = await client.send(
     new RegisterTaskDefinitionCommand({
       family: `hermes-${tenantId}`,
@@ -44,7 +47,7 @@ export async function registerTaskDef(
       containerDefinitions: [
         {
           name: "hermes",
-          image: cfg.hermesImage,
+          image,
           essential: true,
           // Runs as root so s6 cont-init can chown EFS and drop to UID 10000; do not set `user` or `readonlyRootFilesystem` — both break boot.
           // Headless gateway, not the interactive CLI which EOFs in a non-TTY task. On Fargate the dashboard (9119) may not serve even when the API (8642) is healthy — a known gap.
