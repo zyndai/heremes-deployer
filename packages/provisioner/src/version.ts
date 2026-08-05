@@ -40,8 +40,9 @@ export async function resolveAgentVersion(
 
   // Extract the version from the image tag (everything after ":").
   const tag = image.includes(":") ? image.split(":").pop()! : null;
-  if (!tag || tag === "latest") return null;
+  if (!tag) return null;
 
   // Normalise: GitHub tags start with "v", image tags may not.
+  // Accept any tag including "latest" — it's better than "Unknown".
   return tag.startsWith("v") ? tag : `v${tag}`;
 }

@@ -44,10 +44,11 @@ async function fetchLatestVersion(): Promise<{
 
     const releases = (await res.json()) as GitHubRelease[];
 
-    // Pick the first semantic version tag (v0.20.0), skipping date-based tags.
-    const SEMVER_RE = /^v?\d+\.\d+\.\d+$/;
+    // Pick the latest release with a version-like tag. Hermes uses both
+    // date-based (v2026.8.3) and semver (v0.20.0) tags — accept either.
+    const VERSION_RE = /^v?\d{4}\.\d{1,2}\.\d{1,2}/;
     for (const release of releases) {
-      if (SEMVER_RE.test(release.tag_name)) {
+      if (VERSION_RE.test(release.tag_name)) {
         const version = release.tag_name.startsWith("v")
           ? release.tag_name
           : `v${release.tag_name}`;
