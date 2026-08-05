@@ -567,23 +567,48 @@ export async function updateAgent(agentId: string): Promise<void> {
     return;
   }
 
-  const targetImage = `${config.hermesUpstreamRepo}:${targetVersion}`;
+  const upstreamImage = `${config.hermesUpstreamRepo}:${targetVersion}`;
+  // Build a locally patched image that bypasses the Hermes dashboard auth gate.
+  let targetImage = `${config.hermesImagePrefix}:${targetVersion}`;
 
   let step: StepName = "pulling_image";
   const secretValues: string[] = [];
 
   try {
-    // --- 1. pull the new image ---------------------------------------
+    // --- 1. pull upstream image + build patched version --------------
     step = "pulling_image";
     await setStatus(agentId, "updating");
     emitStep(agentId, "pulling_image", "ok");
-    await appendSystemLog(agentId, `[worker] pulling ${targetImage} ...`).catch(() => undefined);
+    await appendSystemLog(agentId, `[worker] pulling ${upstreamImage} ...`).catch(() => undefined);
 
     try {
-      await pullImage(targetImage);
+      await pullImage(upstreamImage);
     } catch (e) {
       const msg = scrubError((e as Error).message, secretValues);
       throw new Error(`image pull failed: ${msg}`);
+    }
+
+    // Build a patched local image that bypasses the Hermes auth gate.
+    // The repo's infra/hermes-image/Dockerfile applies all three patches
+    // (Telegram UA, empty assistant, auth bypass) using --build-arg.
+    const patchDir = `${config.dataRoot}/../../infra/hermes-image`;
+    try {
+      const { execSync } = await import("node:child_process");
+      execSync(
+        `docker build -t ${targetImage} --build-arg HERMES_BASE=${upstreamImage} -f ${patchDir}/Dockerfile ${patchDir}`,
+        { timeout: 60_000, stdio: "pipe" },
+      );
+      await appendSystemLog(
+        agentId,
+        `[worker] built patched image ${targetImage}`,
+      ).catch(() => undefined);
+    } catch (e) {
+      const msg = scrubError((e as Error).message, secretValues);
+      await appendSystemLog(
+        agentId,
+        `[worker] patched build failed, using raw upstream: ${msg}`,
+      ).catch(() => undefined);
+      targetImage = upstreamImage;
     }
     emitStep(agentId, "pulling_image", "ok");
     await appendSystemLog(agentId, `[worker] pulled ${targetImage}`).catch(() => undefined);
