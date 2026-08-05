@@ -591,9 +591,8 @@ export async function updateAgent(agentId: string): Promise<void> {
     // Build a patched local image that bypasses the Hermes auth gate.
     // The repo's infra/hermes-image/Dockerfile applies all three patches
     // (Telegram UA, empty assistant, auth bypass) using --build-arg.
-    // The worker runs from <repo>/packages/deployer-worker/, so process.cwd()
-    // resolves to <repo> (systemd WorkingDirectory).
-    const repoRoot = process.cwd();
+    // systemd WorkingDirectory is packages/deployer-worker/, so walk up to repo root.
+    const repoRoot = `${process.cwd()}/../..`;
     const patchDir = `${repoRoot}/infra/hermes-image`;
     try {
       const { execSync } = await import("node:child_process");
