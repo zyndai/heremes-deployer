@@ -156,6 +156,14 @@ export async function runContainer(opts: RunContainerOpts): Promise<string> {
       `envVars=${env.length}`,
   );
 
+  // Ensure the image is available locally — docker.createContainer does not
+  // auto-pull, so an image that was never referenced before 404s.
+  try {
+    await pullImage(opts.image);
+  } catch (e) {
+    throw new Error(`(HTTP code 404) no such container - No such image: ${opts.image}`);
+  }
+
   const container = await docker.createContainer({
     name: `hermes-${opts.agentId}`,
     Image: opts.image,
