@@ -38,6 +38,16 @@ export async function getOwned(userId: string, tenantId: string): Promise<OwnedA
   return r && isOwned(r) && r.userId === userId ? r : undefined;
 }
 
+// Ownership already verified externally (e.g. via Postgres). Bypasses the
+// userId check so stale DynamoDB userIds (old UUIDs vs new Google subs) don't
+// block operations on records the caller has already confirmed they own.
+export async function getByTenantId(tenantId: string): Promise<OwnedAgent | undefined> {
+  if (dynamo) return (await dynamo.get(tenantId)) as OwnedAgent | undefined;
+  if (supabase) return (await supabase.get(tenantId)) as OwnedAgent | undefined;
+  const r = json!.get(tenantId);
+  return r && isOwned(r) ? r : undefined;
+}
+
 export async function putOwned(record: OwnedAgent): Promise<void> {
   if (dynamo) return dynamo.put(record);
   if (supabase) return supabase.put(record);

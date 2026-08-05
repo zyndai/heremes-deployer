@@ -26,6 +26,7 @@ export function Dashboard({
   // (?zynd=connected / ?zynd_error=...). Seeded from the server prop.
   const [noticeShown, setNoticeShown] = useState(true);
   const atLimit = agents.length >= maxAgents;
+  const personaAgent = agents.find((a) => a.status === "running" && a.hostUrl) ?? null;
   const runningCount = agents.filter((agent) => agent.status === "running").length;
 
   // Ref lets the stable polling interval read the latest list without being a
@@ -146,6 +147,27 @@ export function Dashboard({
             </div>
           </div>
 
+          {personaAgent && (
+            <>
+              <div className="hidden sm:block w-px h-6 bg-panel-edge" />
+              <a
+                href={`/api/agents/${personaAgent.id}/zynd/connect`}
+                className={`hidden sm:flex items-center gap-1.5 px-3 py-1.5 text-[10px] font-mono font-bold uppercase tracking-widest border transition ${
+                  personaAgent.personaLinked
+                    ? "border-panel-edge text-muted-2 hover:border-foreground hover:text-foreground"
+                    : "border-foreground text-foreground hover:bg-foreground hover:text-white"
+                }`}
+              >
+                {personaAgent.personaLinked ? (
+                  <span className="text-green text-[10px]">✓</span>
+                ) : (
+                  <span className="text-[10px]">⬡</span>
+                )}
+                <span>Zynd Memory</span>
+              </a>
+            </>
+          )}
+
           <div className="hidden sm:block w-px h-6 bg-panel-edge" />
 
           {/* User Profile */}
@@ -162,7 +184,7 @@ export function Dashboard({
         </div>
       </nav>
 
-      <div className="flex h-full w-full flex-col px-6 py-6 lg:px-8 relative z-10">
+      <div className="flex flex-1 min-h-0 w-full flex-col px-6 py-6 lg:px-8 relative z-10">
         {/* Main Content Area */}
         <div className="flex flex-1 flex-col overflow-hidden">
 

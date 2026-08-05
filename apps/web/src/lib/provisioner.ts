@@ -17,7 +17,7 @@ import {
 } from "@hermes/provisioner";
 import { buildAwsPublicProvisionDeps, buildAwsPublicTeardownDeps } from "@hermes/provisioner/aws";
 import type { CreateAgentBody } from "./validation";
-import { putOwned, getOwned, deleteOwned, listForUser, type OwnedAgent } from "./store";
+import { putOwned, getOwned, getByTenantId, deleteOwned, listForUser, type OwnedAgent } from "./store";
 
 const RUNTIME = process.env.HERMES_RUNTIME === "aws" ? "aws" : "local";
 const IS_AWS = RUNTIME === "aws";
@@ -134,7 +134,9 @@ export async function updateAgentVersion(
 ): Promise<UpdateResult> {
   if (!IS_AWS) throw new Error("updateAgentVersion is only available on the AWS runtime");
 
-  const record = await getOwned(userId, tenantId);
+  // Ownership verified by caller via Postgres. Use getByTenantId to avoid
+  // userId mismatch when DynamoDB records have stale pre-migration UUIDs.
+  const record = await getByTenantId(tenantId);
   if (!record) throw new AgentNotFoundError();
   if (!record.taskArn || !record.taskDefArn || !record.accessPointId || !record.securityGroupId) {
     throw new Error("agent record is missing ECS details — cannot update");

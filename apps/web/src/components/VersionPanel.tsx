@@ -33,7 +33,7 @@ export function VersionPanel({ agent }: { agent: AgentView }) {
   }, [agent.id]);
 
   useEffect(() => {
-    if (agent.status === "running") {
+    if (agent.status === "running" || agent.status === "failed") {
       void fetchVersion();
     }
   }, [agent.status, fetchVersion]);
@@ -172,8 +172,7 @@ export function VersionPanel({ agent }: { agent: AgentView }) {
     }, 120_000);
   }
 
-  // Don't render anything for non-running, non-updating agents.
-  if (agent.status !== "running" && agent.status !== "updating") return null;
+  if (agent.status !== "running" && agent.status !== "updating" && agent.status !== "failed") return null;
   if (agent.status !== "updating" && !versionInfo) return null;
 
   // --- Updating in progress ---
@@ -249,63 +248,45 @@ export function VersionPanel({ agent }: { agent: AgentView }) {
   // --- Version display ---
   return (
     <>
-      <div className="border border-foreground p-4">
-        <h3 className="text-[10px] font-mono font-bold uppercase tracking-widest text-muted-2 mb-3">
-          Hermes Version
-        </h3>
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <p className="text-xs font-mono uppercase tracking-widest text-muted-2 mb-0.5">Current</p>
-            <p className="text-sm font-mono font-bold text-foreground">
-              {versionInfo?.current ?? "Unknown"}
-            </p>
-          </div>
-          {versionInfo?.latest && (
-            <div>
-              <p className="text-xs font-mono uppercase tracking-widest text-muted-2 mb-0.5">Latest</p>
-              <p className="text-sm font-mono font-bold text-foreground">
-                {versionInfo.latest}
-              </p>
-              {versionInfo.releaseDate && (
-                <p className="text-[10px] font-mono text-muted mt-0.5">
-                  Released {formatRelativeDate(versionInfo.releaseDate)}
-                </p>
-              )}
-            </div>
-          )}
-        </div>
-
-        {versionInfo?.updateAvailable ? (
-          <div className="mt-3 flex flex-wrap items-center gap-3">
-            <span className="text-[10px] font-mono uppercase tracking-widest text-amber">
-              ✓ New update available
-            </span>
-            {versionInfo.changelogUrl && (
-              <a
-                href={versionInfo.changelogUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="text-[10px] font-mono uppercase tracking-widest text-muted-2 hover:text-foreground underline underline-offset-2"
-              >
-                View Changelog
-              </a>
+      <div className="flex items-center gap-3 border border-foreground px-4 py-2.5">
+        <span className="text-[10px] font-mono font-bold uppercase tracking-widest text-muted-2 shrink-0">Hermes</span>
+        <span className="text-xs font-mono font-bold text-foreground shrink-0">
+          {versionInfo?.current ?? "Unknown"}
+        </span>
+        {versionInfo?.latest && versionInfo.updateAvailable && (
+          <>
+            <span className="text-muted-2/40 text-xs shrink-0">→</span>
+            <span className="text-xs font-mono font-bold text-amber shrink-0">{versionInfo.latest}</span>
+            {versionInfo.releaseDate && (
+              <span className="text-[10px] font-mono text-muted-2 shrink-0">
+                {formatRelativeDate(versionInfo.releaseDate)}
+              </span>
             )}
+          </>
+        )}
+        {!versionInfo?.updateAvailable && versionInfo?.current && (
+          <span className="text-[10px] font-mono uppercase tracking-widest text-green shrink-0">✓ Latest</span>
+        )}
+        <div className="flex items-center gap-3 ml-auto shrink-0">
+          {versionInfo?.updateAvailable && versionInfo.changelogUrl && (
+            <a
+              href={versionInfo.changelogUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="text-[10px] font-mono uppercase tracking-widest text-muted-2 hover:text-foreground underline underline-offset-2 hidden sm:block"
+            >
+              Changelog
+            </a>
+          )}
+          {versionInfo?.updateAvailable && (
             <button
               onClick={() => setShowModal(true)}
-              className="ml-auto border border-foreground bg-transparent px-3 py-1.5 text-[10px] font-mono font-bold uppercase tracking-widest text-foreground transition hover:bg-foreground hover:text-white"
+              className="border border-amber text-amber px-3 py-1 text-[10px] font-mono font-bold uppercase tracking-widest transition hover:bg-amber hover:text-white"
             >
-              Update Hermes
+              Update
             </button>
-          </div>
-        ) : versionInfo?.current ? (
-          <p className="mt-3 text-[10px] font-mono uppercase tracking-widest text-green">
-            ✓ You&apos;re running the latest version.
-          </p>
-        ) : (
-          <p className="mt-3 text-[10px] font-mono uppercase tracking-widest text-muted-2">
-            Version unknown — agent was deployed before version tracking.
-          </p>
-        )}
+          )}
+        </div>
       </div>
 
       {showModal && versionInfo?.latest && (

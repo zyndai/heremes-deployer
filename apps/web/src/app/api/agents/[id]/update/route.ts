@@ -28,7 +28,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   if (!agent) return NextResponse.json({ error: "not found" }, { status: 404 });
   if (agent.userId !== user.id) await healOwnership(user, agent.id);
 
-  if (agent.status !== "running") {
+  // Allow retry from "failed" — a prior update may have set this status before
+  // any ECS call succeeded, leaving the original task still running.
+  if (agent.status !== "running" && agent.status !== "failed") {
     return NextResponse.json(
       { error: "agent must be running to update (current status: " + agent.status + ")" },
       { status: 409 },
