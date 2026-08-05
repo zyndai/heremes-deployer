@@ -157,11 +157,18 @@ export async function runContainer(opts: RunContainerOpts): Promise<string> {
   );
 
   // Ensure the image is available locally — docker.createContainer does not
-  // auto-pull, so an image that was never referenced before 404s.
+  // auto-pull, so images that were never referenced before 404. Skip the pull
+  // for locally-built images that exist on the daemon (they won't be on a
+  // remote registry). The try/catch ignores pull failures for local images.
   try {
-    await pullImage(opts.image);
-  } catch (e) {
-    throw new Error(`(HTTP code 404) no such container - No such image: ${opts.image}`);
+    const existing = await docker.getImage(opts.image).inspect().catch(() => null);
+    if (!existing) {
+      console.log(`[docker] image ${opts.image} not local, pulling`);
+      await pullImage(opts.image);
+    }
+  } catch {
+    // Pull failed — the image might be a local build. If createContainer
+    // fails too, it will surface a clear error.
   }
 
   const container = await docker.createContainer({
