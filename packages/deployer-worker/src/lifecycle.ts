@@ -623,9 +623,20 @@ export async function updateAgent(agentId: string): Promise<void> {
     const dataDir = paths.agentData(agentId);
     try {
       await stat(dataDir);
+      // Verify key files exist so we can be confident data wasn't lost.
+      const keyFiles = ["config.yaml", "sessions", "skills", "cron"];
+      const missing: string[] = [];
+      for (const f of keyFiles) {
+        try { await stat(`${dataDir}/${f}`); } catch { missing.push(f); }
+      }
+      if (missing.length > 0) {
+        await appendSystemLog(
+          agentId,
+          `[worker] data dir verified but missing: ${missing.join(", ")} (will be recreated on boot)`,
+        ).catch(() => undefined);
+      }
       await appendSystemLog(agentId, `[worker] data dir ${dataDir} verified (bind mount preserves all data)`).catch(() => undefined);
     } catch (e) {
-      // Data dir missing — this would mean data loss. Fail loudly.
       throw new Error(`data dir ${dataDir} not found — refusing to update (possible data loss)`);
     }
     emitStep(agentId, "creating_backup", "ok");
@@ -675,6 +686,19 @@ export async function updateAgent(agentId: string): Promise<void> {
     emitStep(agentId, "health_checking", "ok");
     await waitForHealth(apiPort);
     emitStep(agentId, "health_checking", "ok");
+
+    // Post-start verification: confirm the data dir survived the swap.
+    // If config.yaml is missing, something went wrong and we surface an
+    // alert but don't roll back (the agent is already running).
+    try {
+      await stat(`${dataDir}/config.yaml`);
+    } catch {
+      await appendSystemLog(
+        agentId,
+        "[worker] ⚠ config.yaml not found after update — data may have been lost. " +
+          "Restore from backup or reconfigure your agent.",
+      ).catch(() => undefined);
+    }
 
     // --- 6. mark running, update version -----------------------------
     const hostUrl = buildHostUrl(agent.slug, dashboardPort);

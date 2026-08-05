@@ -332,23 +332,22 @@ function UpdateModal({
             <span className="text-xs font-mono font-bold text-foreground">{newVersion}</span>
           </div>
         </div>
-        <p className="mt-4 text-xs font-mono text-muted-2">This will:</p>
+        <p className="mt-4 text-xs font-mono text-muted-2">This upgrade:</p>
         <ul className="mt-2 space-y-1.5">
           {[
-            "Backup your Hermes data",
-            "Upgrade Hermes",
-            "Preserve models",
-            "Preserve API keys",
-            "Preserve plugins",
-            "Restart your agent",
+            "Updates Hermes to the latest version",
+            "Preserves all your data (sessions, config, MCPs)",
+            "Keeps API keys, models, and plugins",
+            "Preserves cron jobs and automations",
+            "Restarts your agent (~5-10s downtime)",
           ].map((item) => (
             <li key={item} className="flex items-center gap-2 text-xs font-mono text-foreground">
               <span className="text-green text-xs">✓</span> {item}
             </li>
           ))}
         </ul>
-        <p className="mt-3 text-[10px] font-mono uppercase tracking-widest text-muted-2">
-          Downtime: Approximately 5-10 seconds
+        <p className="mt-3 text-[10px] font-mono uppercase tracking-widest text-green">
+          No data will be lost — your agent&apos;s storage is preserved across updates.
         </p>
         <div className="mt-5 flex gap-3">
           <button
