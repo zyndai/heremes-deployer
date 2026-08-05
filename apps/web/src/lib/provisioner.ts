@@ -134,38 +134,28 @@ export async function updateAgentVersion(
 ): Promise<UpdateResult> {
   if (!IS_AWS) throw new Error("updateAgentVersion is only available on the AWS runtime");
 
-  // Ownership verified by caller via Postgres. Use getByTenantId to avoid
-  // userId mismatch when DynamoDB records have stale pre-migration UUIDs.
-  const record = await getByTenantId(tenantId);
-  if (!record) throw new AgentNotFoundError();
-  if (!record.taskArn || !record.taskDefArn || !record.accessPointId || !record.securityGroupId) {
-    throw new Error("agent record is missing ECS details — cannot update");
-  }
-
-  const input: UpdateInput = {
-    tenantId,
-    targetImage,
-    taskArn: record.taskArn,
-    taskDefArn: record.taskDefArn,
-    accessPointId: record.accessPointId,
-    securityGroupId: record.securityGroupId,
-    ...(record.targetGroupArn &&
-    record.targetGroupArn !== "no-alb" &&
-    record.listenerRuleArn
-      ? { targetGroupArn: record.targetGroupArn, listenerRuleArn: record.listenerRuleArn }
-      : {}),
-  };
+  // Find the running ECS task directly (no DynamoDB dependency). The task
+  // family is hermes-{tenantId} — discover taskArn, taskDefArn, accessPointId,
+  // and security group from ECS/EC2 APIs.
+  const input: UpdateInput = { tenantId, targetImage };
 
   const result = await updateAwsAgent(input);
 
-  // Update the DynamoDB agent record with the new task details.
-  const updated: OwnedAgent = {
-    ...record,
-    status: "running",
-    taskArn: result.taskArn,
-    taskDefArn: result.taskDefArn,
-  };
-  await putOwned(updated);
+  // Try to update the DynamoDB record if it exists (best-effort).
+  try {
+    const record = await getByTenantId(tenantId);
+    if (record) {
+      const updated: OwnedAgent = {
+        ...record,
+        status: "running",
+        taskArn: result.taskArn,
+        taskDefArn: result.taskDefArn,
+      };
+      await putOwned(updated);
+    }
+  } catch {
+    // DynamoDB record may not exist — that's fine, the update succeeded.
+  }
 
   return result;
 }
