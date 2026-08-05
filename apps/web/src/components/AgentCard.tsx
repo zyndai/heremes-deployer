@@ -45,6 +45,24 @@ export function AgentCard({
   const stopped = agent.status === "stopped";
   const unhealthy = agent.status === "unhealthy";
 
+  // Fetch version info once on mount for the inline badge.
+  const [latestVersion, setLatestVersion] = useState<string | null>(null);
+  const [updateAvailable, setUpdateAvailable] = useState(false);
+  useEffect(() => {
+    if (!running) return;
+    let cancelled = false;
+    fetch(`/api/agents/${agent.id}/version`)
+      .then((r) => r.ok ? r.json() : null)
+      .then((d: { latest?: string | null; updateAvailable?: boolean } | null) => {
+        if (!cancelled && d) {
+          setLatestVersion(d.latest ?? null);
+          setUpdateAvailable(d.updateAvailable ?? false);
+        }
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [agent.id, running]);
+
   async function control(action: Action) {
     setBusy(action);
     try {
@@ -88,6 +106,16 @@ export function AgentCard({
               <ActionButton label="Restart" busyLabel="restarting…" active={busy === "restart"} disabled={!!busy} onClick={() => control("restart")} />
               <ActionButton label="Stop" busyLabel="stopping…" active={busy === "stop"} disabled={!!busy} onClick={() => control("stop")} />
             </>
+          )}
+
+          {/* Inline Hermes version badge + update trigger */}
+          {running && latestVersion && (
+            <InlineVersionBadge
+              agentId={agent.id}
+              currentVersion={agent.hermesVersion ?? undefined}
+              latestVersion={latestVersion}
+              updateAvailable={updateAvailable}
+            />
           )}
           
           <button
@@ -370,5 +398,71 @@ function ActionButton({
     <button onClick={onClick} disabled={disabled} className={cls}>
       {active ? busyLabel : label}
     </button>
+  );
+}
+
+function InlineVersionBadge({
+  agentId,
+  currentVersion,
+  latestVersion,
+  updateAvailable,
+}: {
+  agentId: string;
+  currentVersion?: string;
+  latestVersion: string;
+  updateAvailable: boolean;
+}) {
+  const [updating, setUpdating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function triggerUpdate() {
+    setUpdating(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/agents/${agentId}/update`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ targetVersion: latestVersion }),
+      });
+      if (!res.ok) {
+        const d = (await res.json().catch(() => ({}))) as { error?: string };
+        setError(d.error ?? "Update failed");
+      }
+    } catch {
+      setError("Network error");
+    } finally {
+      setUpdating(false);
+    }
+  }
+
+  const showCurrent = currentVersion && currentVersion !== "Unknown";
+  const shortLatest = latestVersion.replace(/^v/, "");
+
+  return (
+    <span className="inline-flex items-center gap-1.5 px-2 py-1 font-mono text-[10px] tracking-wider select-none">
+      {showCurrent ? (
+        <>
+          <span className="text-muted-2">
+            {currentVersion!.replace(/^v/, "")}
+          </span>
+          <span className="text-muted-2/40">→</span>
+          <span className="text-foreground">{shortLatest}</span>
+        </>
+      ) : (
+        <span className="text-muted-2">v?</span>
+      )}
+      {updateAvailable && (
+        <button
+          onClick={triggerUpdate}
+          disabled={updating}
+          className="ml-1 border border-amber/60 text-amber px-2 py-0.5 text-[9px] font-bold uppercase tracking-widest transition hover:bg-amber hover:text-white disabled:opacity-40"
+        >
+          {updating ? "…" : "Update"}
+        </button>
+      )}
+      {error && (
+        <span className="text-red text-[9px] ml-1" title={error}>✕</span>
+      )}
+    </span>
   );
 }
