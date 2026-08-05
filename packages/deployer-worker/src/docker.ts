@@ -9,7 +9,7 @@
 
 import Docker from "dockerode";
 
-import { config, API_PORT, DASHBOARD_PORT } from "./config";
+import { config, API_PORT, DASHBOARD_PORT, HERMES_UID, HERMES_GID } from "./config";
 
 export const docker = new Docker({ socketPath: config.dockerSocket });
 
@@ -201,12 +201,12 @@ export async function runContainer(opts: RunContainerOpts): Promise<string> {
       ReadonlyRootfs: true,
       // Read-only rootfs needs writable tmpfs mounts. /tmp is the gateway's
       // scratch. /run is required by the image's s6-overlay init, which writes
-      // its supervision tree there at startup — without it s6 dies with
-      // "unable to remove /run/s6: Read-only file system" (exit 111) before the
-      // gateway ever boots. exec allowed on /tmp; size counts against the limit.
+      // its supervision tree there at startup AND requires it to be owned by
+      // the container uid (10000) — otherwise s6-overlay fails with:
+      // "fatal: /run belongs to uid 0 instead of 10000".
       Tmpfs: {
-        "/tmp": `rw,exec,size=${config.containerTmpfsMb}m`,
-        "/run": `rw,exec,size=${config.containerTmpfsMb}m`,
+        "/tmp": `rw,exec,size=${config.containerTmpfsMb}m,uid=${HERMES_UID},gid=${HERMES_GID}`,
+        "/run": `rw,exec,size=${config.containerTmpfsMb}m,uid=${HERMES_UID},gid=${HERMES_GID}`,
       },
       // Block privilege escalation (setuid binaries can't gain capabilities).
       SecurityOpt: ["no-new-privileges"],

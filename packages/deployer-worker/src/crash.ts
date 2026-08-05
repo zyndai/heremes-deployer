@@ -75,15 +75,25 @@ export async function watchCrashes(): Promise<void> {
           continue;
         }
 
-        // Idempotency: skip if already terminal. Prevents reprocessing the
-        // same container when docker emits both `oom` and `die` for one exit.
-        if (
-          current.status === "stopped" ||
-          current.status === "crashed" ||
-          current.status === "failed"
-        ) {
+        // Idempotency: skip if already terminal or in the deploy pipeline.
+        // During a restart/redeploy, the old container is torn down while the
+        // agent is queued/starting — the crash watcher must not mark these as
+        // crashed because a new container is about to replace the old one.
+        const SKIP_STATUSES = new Set([
+          "stopped",
+          "crashed",
+          "failed",
+          "queued",
+          "allocating_ports",
+          "starting",
+          "health_checking",
+          "registering_route",
+          "updating",
+          "deleting",
+        ]);
+        if (SKIP_STATUSES.has(current.status)) {
           console.log(
-            `[crash watcher] agent ${agentId} already ${current.status}, ignoring ${action}`
+            `[crash watcher] agent ${agentId} status=${current.status}, ignoring ${action}`
           );
           continue;
         }
