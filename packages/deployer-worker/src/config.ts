@@ -49,6 +49,11 @@ export const config = {
   // e.g. "ghcr.io/zynd/hermes-agent:0.19.0" -> "ghcr.io/zynd/hermes-agent"
   hermesImagePrefix: required("HERMES_IMAGE").replace(/:[^:]+$/, ""),
 
+  // The upstream Hermes agent Docker repo — version tags here correspond to
+  // GitHub releases. Updates pull from this source regardless of HERMES_IMAGE.
+  hermesUpstreamRepo:
+    optional("HERMES_UPSTREAM_REPO", "nousresearch/hermes-agent"),
+
   // Current Hermes agent version (the tag suffix of HERMES_IMAGE).
   // e.g. "ghcr.io/zynd/hermes-agent:0.19.0" -> "0.19.0"
   // Default agents get this version when first deployed.

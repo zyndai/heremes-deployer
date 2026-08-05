@@ -567,7 +567,7 @@ export async function updateAgent(agentId: string): Promise<void> {
     return;
   }
 
-  const targetImage = `${config.hermesImagePrefix}:${targetVersion}`;
+  const targetImage = `${config.hermesUpstreamRepo}:${targetVersion}`;
 
   let step: StepName = "pulling_image";
   const secretValues: string[] = [];
