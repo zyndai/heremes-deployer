@@ -15,6 +15,7 @@ const DETAIL_SELECT = {
   llmProvider: true,
   personalityId: true,
   personaLinked: true,
+  hermesVersion: true,
   createdAt: true,
   startedAt: true,
 } as const;

@@ -12,7 +12,7 @@ import { mkdir, chown, chmod, stat, writeFile, readFile } from "node:fs/promises
 import { prisma } from "./db";
 import { config, paths, HERMES_UID, HERMES_GID } from "./config";
 import { allocatePort, releasePort } from "./ports";
-import { runContainer, stopAndRemove, waitForHealth } from "./docker";
+import { runContainer, stopAndRemove, waitForHealth, pullImage } from "./docker";
 import { addRoute, removeRoute } from "./caddy";
 import { readSecret } from "./db-secrets";
 import {
@@ -36,7 +36,8 @@ export type AgentStatus =
   | "unhealthy"
   | "failed"
   | "stopped"
-  | "crashed";
+  | "crashed"
+  | "updating";
 
 interface AgentRow {
   id: string;
@@ -49,6 +50,8 @@ interface AgentRow {
   apiPort?: number | null;
   dashboardPort?: number | null;
   containerId?: string | null;
+  hermesVersion?: string | null;
+  targetHermesVersion?: string | null;
 }
 
 const ACTIVE_STATUSES: ReadonlyArray<string> = [
@@ -59,6 +62,7 @@ const ACTIVE_STATUSES: ReadonlyArray<string> = [
   "registering_route",
   "running",
   "unhealthy",
+  "updating",
 ];
 
 function buildHostUrl(slug: string, dashboardPort: number): string {
@@ -449,7 +453,14 @@ export async function drive(agentId: string): Promise<void> {
     const hostUrl = buildHostUrl(agent.slug, dashboardPort);
     await prisma.agent.update({
       where: { id: agentId },
-      data: { status: "running", hostUrl },
+      data: {
+        status: "running",
+        hostUrl,
+        // Set version on first deploy (null-safe: won't overwrite a post-update version).
+        ...(agent.hermesVersion == null
+          ? { hermesVersion: config.hermesVersion }
+          : {}),
+      },
     });
     emitStep(agentId, "running", "ok");
     emitReady(agentId, hostUrl);
@@ -516,4 +527,180 @@ export async function controlAgent(
     data: { status: "queued", containerId: null, apiPort: null, dashboardPort: null },
   });
   await drive(agentId);
+}
+
+/**
+ * Update an agent's Hermes version in-place. The bind-mounted dataDir preserves
+ * all user data (config.yaml, sessions, bot tokens, MCP configs, cron jobs,
+ * automations) across the container swap — no backup copy needed.
+ *
+ * Steps (streamed via events):
+ *   1. pulling_image    — docker pull <imagePrefix>:<targetVersion>
+ *   2. creating_backup  — verify dataDir exists + has content (no-op; bind mount IS persistence)
+ *   3. stopping_container — stop + remove the old container
+ *   4. starting_updated — create + start new container with SAME ports/volume/env, NEW image
+ *   5. health_checking  — poll /health until 200
+ *   6. running          — mark status=running, update hermesVersion
+ */
+export async function updateAgent(agentId: string): Promise<void> {
+  const agent = (await prisma.agent.findUnique({
+    where: { id: agentId },
+    select: {
+      id: true,
+      userId: true,
+      slug: true,
+      status: true,
+      llmProvider: true,
+      secretRef: true,
+      personalityId: true,
+      apiPort: true,
+      dashboardPort: true,
+      containerId: true,
+      targetHermesVersion: true,
+    },
+  })) as (AgentRow & { targetHermesVersion?: string | null }) | null;
+
+  if (!agent || agent.status !== "updating") return;
+  const targetVersion = agent.targetHermesVersion;
+  if (!targetVersion) {
+    await failDeployment(agentId, "pulling_image", "no target version set", async () => {});
+    return;
+  }
+
+  const targetImage = `${config.hermesImagePrefix}:${targetVersion}`;
+
+  let step: StepName = "pulling_image";
+  const secretValues: string[] = [];
+
+  try {
+    // --- 1. pull the new image ---------------------------------------
+    step = "pulling_image";
+    await setStatus(agentId, "updating");
+    emitStep(agentId, "pulling_image", "ok");
+    await appendSystemLog(agentId, `[worker] pulling ${targetImage} ...`).catch(() => undefined);
+
+    try {
+      await pullImage(targetImage);
+    } catch (e) {
+      const msg = scrubError((e as Error).message, secretValues);
+      throw new Error(`image pull failed: ${msg}`);
+    }
+    emitStep(agentId, "pulling_image", "ok");
+    await appendSystemLog(agentId, `[worker] pulled ${targetImage}`).catch(() => undefined);
+
+    // --- 2. verify data persistence (bind mount is the backup) -------
+    step = "creating_backup";
+    emitStep(agentId, "creating_backup", "ok");
+    const dataDir = paths.agentData(agentId);
+    try {
+      await stat(dataDir);
+      await appendSystemLog(agentId, `[worker] data dir ${dataDir} verified (bind mount preserves all data)`).catch(() => undefined);
+    } catch (e) {
+      // Data dir missing — this would mean data loss. Fail loudly.
+      throw new Error(`data dir ${dataDir} not found — refusing to update (possible data loss)`);
+    }
+    emitStep(agentId, "creating_backup", "ok");
+
+    // --- 3. stop the old container -----------------------------------
+    step = "stopping_container";
+    emitStep(agentId, "stopping_container", "ok");
+    if (agent.containerId) {
+      await stopAndRemove(agent.containerId);
+      await appendSystemLog(agentId, `[worker] stopped old container ${agent.containerId.slice(0, 12)}`).catch(() => undefined);
+    }
+    emitStep(agentId, "stopping_container", "ok");
+
+    // --- 4. start the new container ----------------------------------
+    step = "starting_updated";
+    emitStep(agentId, "starting_updated", "ok");
+    const secret = await readSecret(agentId);
+    secretValues.push(...Object.values(secret).filter((v): v is string => typeof v === "string"));
+    const env = buildAgentEnv({
+      secret,
+      llmProvider: agent.llmProvider as LlmProvider,
+      ...(agent.personalityId ? { personalityId: agent.personalityId } : {}),
+    });
+
+    const apiPort = agent.apiPort!;
+    const dashboardPort = agent.dashboardPort!;
+
+    const containerId = await runContainer({
+      agentId,
+      apiPort,
+      dashboardPort,
+      image: targetImage,
+      env,
+      dataDir,
+    });
+
+    await prisma.agent.update({
+      where: { id: agentId },
+      data: { containerId, startedAt: new Date() },
+    });
+    await appendSystemLog(agentId, `[worker] started updated container ${containerId.slice(0, 12)} (${targetImage})`);
+    await startTailer(agentId, containerId).catch(() => undefined);
+    emitStep(agentId, "starting_updated", "ok");
+
+    // --- 5. health check ---------------------------------------------
+    step = "health_checking";
+    emitStep(agentId, "health_checking", "ok");
+    await waitForHealth(apiPort);
+    emitStep(agentId, "health_checking", "ok");
+
+    // --- 6. mark running, update version -----------------------------
+    const hostUrl = buildHostUrl(agent.slug, dashboardPort);
+    await prisma.agent.update({
+      where: { id: agentId },
+      data: {
+        status: "running",
+        hostUrl,
+        hermesVersion: targetVersion,
+        targetHermesVersion: null,
+      },
+    });
+    emitStep(agentId, "running", "ok");
+    emitStep(agentId, "updating_complete", "ok");
+    emitReady(agentId, hostUrl);
+    await appendSystemLog(agentId, `[worker] updated to ${targetVersion}, live at ${hostUrl}`);
+
+    // Pre-warm TLS
+    if (hostUrl.startsWith("https://")) {
+      void fetch(hostUrl, { method: "HEAD", signal: AbortSignal.timeout(20_000) }).catch(() => undefined);
+    }
+  } catch (e) {
+    const msg = scrubError((e as Error).message, secretValues);
+    await failDeployment(agentId, step, msg, async () => {
+      if (agent.containerId) await stopAndRemove(agent.containerId).catch(() => undefined);
+    });
+  }
+}
+
+/**
+ * Sweep the next `updating` agent — called every tick from main.ts.
+ * Mirrors drainQueue's pattern: find oldest, claim with pessimistic update,
+ * run updateAgent synchronously.
+ */
+export async function drainUpdates(): Promise<void> {
+  const candidate = await prisma.agent.findFirst({
+    where: { status: "updating", targetHermesVersion: { not: null } },
+    orderBy: { createdAt: "asc" },
+    select: { id: true },
+  });
+  if (!candidate) return;
+
+  // Claim it (pessimistic lock: mark as updating again — idempotent).
+  const claimed = await prisma.agent.updateMany({
+    where: { id: candidate.id, status: "updating", targetHermesVersion: { not: null } },
+    data: { status: "updating" },
+  });
+  if (claimed.count === 0) return;
+
+  console.log(`[worker] drainUpdates claiming agent=${candidate.id} for version update`);
+  const t0 = Date.now();
+  try {
+    await updateAgent(candidate.id);
+    console.log(`[worker] updateAgent(${candidate.id}) finished in ${Date.now() - t0}ms`);
+  } catch (e) {
+    console.error(`[worker] updateAgent(${candidate.id}) threw after ${Date.now() - t0}ms:`, e);
+  }
 }

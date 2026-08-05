@@ -7,5 +7,6 @@ export interface AgentView {
   hostUrl: string | null;
   personalityId?: string;
   personaLinked: boolean;
+  hermesVersion?: string | null;
   createdAt: string;
 }

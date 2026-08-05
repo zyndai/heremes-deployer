@@ -83,6 +83,7 @@ export function Dashboard({
         hostUrl: string | null;
         personalityId?: string;
         personaLinked: boolean;
+        hermesVersion?: string | null;
         createdAt: string;
       }>;
     };
@@ -95,6 +96,7 @@ export function Dashboard({
         hostUrl: a.hostUrl,
         ...(a.personalityId ? { personalityId: a.personalityId } : {}),
         personaLinked: a.personaLinked,
+        hermesVersion: a.hermesVersion,
         createdAt: a.createdAt,
       })),
     );

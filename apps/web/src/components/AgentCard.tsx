@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { StatusBadge } from "./StatusBadge";
+import { VersionPanel } from "./VersionPanel";
 import type { AgentView } from "./types";
 
 type Action = "start" | "stop" | "restart";
@@ -147,6 +148,11 @@ export function AgentCard({
               {agent.personaLinked ? "Reconnect" : "Connect Zynd Persona"}
             </a>
           </div>
+        )}
+
+        {/* Hermes Version — only for running or updating agents */}
+        {(running || agent.status === "updating") && (
+          <VersionPanel agent={agent} />
         )}
 
         {stopped && (

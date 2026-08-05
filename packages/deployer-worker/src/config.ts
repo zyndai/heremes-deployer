@@ -44,6 +44,16 @@ export const config = {
   // boot the wrong (or a non-existent) image, so we fail fast at load.
   hermesImage: required("HERMES_IMAGE"),
 
+  // Image name without the tag (everything before the last ':'), used to
+  // build the target image during a version update. Derived from HERMES_IMAGE.
+  // e.g. "ghcr.io/zynd/hermes-agent:0.19.0" -> "ghcr.io/zynd/hermes-agent"
+  hermesImagePrefix: required("HERMES_IMAGE").replace(/:[^:]+$/, ""),
+
+  // Current Hermes agent version (the tag suffix of HERMES_IMAGE).
+  // e.g. "ghcr.io/zynd/hermes-agent:0.19.0" -> "0.19.0"
+  // Default agents get this version when first deployed.
+  hermesVersion: required("HERMES_IMAGE").split(":").pop() ?? "unknown",
+
   dataRoot,
   // Public host agents are reached on: https://<wildcardDomain>/<slug>. The
   // canonical var is HERMES_DOMAIN (the same one the Caddyfile + web app use);

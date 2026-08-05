@@ -17,7 +17,13 @@ export type StepName =
   | "unhealthy"
   | "failed"
   | "stopped"
-  | "crashed";
+  | "crashed"
+  // Update flow steps
+  | "pulling_image"
+  | "creating_backup"
+  | "stopping_container"
+  | "starting_updated"
+  | "updating_complete";
 
 export type StepState = "started" | "ok" | "failed";
 

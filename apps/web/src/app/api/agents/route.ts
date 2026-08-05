@@ -37,6 +37,7 @@ export async function GET() {
       hostUrl: true,
       personalityId: true,
       personaLinked: true,
+      hermesVersion: true,
       createdAt: true,
     },
   });
@@ -50,6 +51,7 @@ export async function GET() {
     hostUrl: a.hostUrl,
     personalityId: a.personalityId,
     personaLinked: a.personaLinked,
+    hermesVersion: a.hermesVersion,
     createdAt: a.createdAt,
   }));
   return NextResponse.json({ agents });
