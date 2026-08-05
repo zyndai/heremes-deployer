@@ -97,13 +97,22 @@ export async function GET(
 
   const latest = await fetchLatestVersion();
 
+  // Normalise the current version for display. Non-standard tags like
+  // "latest-patched" or "latest" mean the agent is running the latest
+  // upstream code — treat them as "up to date".
+  const VERSION_RE = /^v?\d{4}\.\d{1,2}\.\d{1,2}/;
+  const isStandardTag = currentVersion && VERSION_RE.test(currentVersion);
+  const displayVersion = isStandardTag ? currentVersion : (latest?.version ?? currentVersion);
+
   return NextResponse.json({
-    current: currentVersion ?? null,
+    current: displayVersion ?? null,
     latest: latest?.version ?? null,
     releaseDate: latest?.releaseDate ?? null,
     changelogUrl: latest?.changelogUrl ?? null,
+    // Only show update available when the agent is running a known older version.
     updateAvailable:
       latest != null &&
-      (currentVersion == null || currentVersion !== latest.version),
+      isStandardTag &&
+      currentVersion !== latest.version,
   });
 }

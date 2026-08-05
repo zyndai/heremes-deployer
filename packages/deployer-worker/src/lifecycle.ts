@@ -457,7 +457,9 @@ export async function drive(agentId: string): Promise<void> {
         status: "running",
         hostUrl,
         // Set version on first deploy (null-safe: won't overwrite a post-update version).
-        ...(agent.hermesVersion == null
+        // Only set if it's a real version tag — skip non-standard tags like
+        // "latest-patched" which are meaningless for version comparison.
+        ...(agent.hermesVersion == null && /^v?\d{4}\.\d{1,2}/.test(config.hermesVersion)
           ? { hermesVersion: config.hermesVersion }
           : {}),
       },
