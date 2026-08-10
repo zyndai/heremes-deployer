@@ -3,6 +3,7 @@
 import { useState, useEffect } from "react";
 import { StatusBadge } from "./StatusBadge";
 import { VersionPanel } from "./VersionPanel";
+import { AgentTerminal } from "./AgentTerminal";
 import type { AgentView } from "./types";
 
 type Action = "start" | "stop" | "restart";
@@ -41,6 +42,7 @@ export function AgentCard({
   deleting: boolean;
 }) {
   const [busy, setBusy] = useState<Action | null>(null);
+  const [activeTab, setActiveTab] = useState<"activity" | "terminal">("activity");
   const running = agent.status === "running";
   const stopped = agent.status === "stopped";
   const unhealthy = agent.status === "unhealthy";
@@ -182,9 +184,52 @@ export function AgentCard({
       </div>
 
       {(running || stopped || unhealthy) && (
-        <TerminalLogs agentId={agent.id} />
+        <div className="flex flex-1 flex-col min-h-0">
+          <div className="flex shrink-0 gap-1">
+            <TabButton label="Activity" active={activeTab === "activity"} onClick={() => setActiveTab("activity")} />
+            {/* Shell needs a live container to exec into (shell.ts checks
+                status==="running") — only offer the tab when there's one. */}
+            {running && (
+              <TabButton
+                label="Terminal"
+                active={activeTab === "terminal"}
+                onClick={() => setActiveTab("terminal")}
+              />
+            )}
+          </div>
+          {activeTab === "activity" || !running ? (
+            <TerminalLogs agentId={agent.id} />
+          ) : (
+            // Mounted only while this tab is active — switching away tears
+            // down the WS + exec instead of leaving a shell running unwatched.
+            <AgentTerminal agentId={agent.id} />
+          )}
+        </div>
       )}
     </div>
+  );
+}
+
+function TabButton({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`border border-b-0 border-foreground px-4 py-1.5 font-mono text-[10px] font-bold uppercase tracking-widest transition ${
+        active
+          ? "bg-foreground text-white"
+          : "bg-transparent text-muted-2 hover:text-foreground"
+      }`}
+    >
+      {label}
+    </button>
   );
 }
 

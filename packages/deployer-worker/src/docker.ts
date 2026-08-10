@@ -13,6 +13,47 @@ import { config, API_PORT, DASHBOARD_PORT, HERMES_UID, HERMES_GID } from "./conf
 
 export const docker = new Docker({ socketPath: config.dockerSocket });
 
+// Every agent container attaches here instead of the Docker default `bridge`.
+// enable_icc=false blocks container-to-container traffic on this network (no
+// agent can reach another agent's IP/ports), while outbound internet access
+// (LLM API calls) and the host's 127.0.0.1 port-published reachability (how
+// Caddy talks to every container today) are both untouched — neither depends
+// on ICC. Isolation boundary for the exec-shell feature: a shell inside one
+// agent's container still can't reach a sibling agent's container.
+const AGENT_NETWORK_NAME = "hermes-agents";
+
+let agentNetworkEnsured = false;
+
+/**
+ * Idempotently create the isolated bridge network. Cached in-process after
+ * the first success so steady-state deploys don't pay a listNetworks round
+ * trip every time. Safe to call concurrently — a racing "already exists"
+ * from the daemon is swallowed, any other failure propagates.
+ */
+export async function ensureAgentNetwork(): Promise<void> {
+  if (agentNetworkEnsured) return;
+  const existing = await docker.listNetworks({
+    filters: JSON.stringify({ name: [AGENT_NETWORK_NAME] }),
+  });
+  if (existing.some((n) => n.Name === AGENT_NETWORK_NAME)) {
+    agentNetworkEnsured = true;
+    return;
+  }
+  try {
+    await docker.createNetwork({
+      Name: AGENT_NETWORK_NAME,
+      Driver: "bridge",
+      Options: { "com.docker.network.bridge.enable_icc": "false" },
+    });
+  } catch (e) {
+    // Another tick/process won the create race between our list and create —
+    // fine, the network exists either way. Anything else (daemon down, perm
+    // denied) is a real failure and must surface to the caller.
+    if (!/already exists/i.test((e as Error).message ?? "")) throw e;
+  }
+  agentNetworkEnsured = true;
+}
+
 export async function stopAndRemove(containerId: string): Promise<void> {
   const c = docker.getContainer(containerId);
   try {
@@ -171,6 +212,8 @@ export async function runContainer(opts: RunContainerOpts): Promise<string> {
     // fails too, it will surface a clear error.
   }
 
+  await ensureAgentNetwork();
+
   const container = await docker.createContainer({
     name: `hermes-${opts.agentId}`,
     Image: opts.image,
@@ -196,6 +239,9 @@ export async function runContainer(opts: RunContainerOpts): Promise<string> {
         ],
       },
       RestartPolicy: { Name: "unless-stopped" },
+      // Isolated network (see ensureAgentNetwork above) — not the Docker
+      // default `bridge`, so this container can't reach any other agent's.
+      NetworkMode: AGENT_NETWORK_NAME,
       Memory: config.containerMemoryMb * 1024 * 1024,
       NanoCpus: config.containerCpuMillis * 1_000_000,
       ReadonlyRootfs: true,

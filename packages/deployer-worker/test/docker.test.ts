@@ -2,10 +2,14 @@ import { beforeEach, expect, test, vi } from "vitest";
 
 const getContainer = vi.fn();
 const createContainerMock = vi.fn();
+const listNetworksMock = vi.fn();
+const createNetworkMock = vi.fn();
 vi.mock("dockerode", () => ({
   default: vi.fn().mockImplementation(() => ({
     getContainer,
     createContainer: createContainerMock,
+    listNetworks: listNetworksMock,
+    createNetwork: createNetworkMock,
   })),
 }));
 
@@ -21,6 +25,12 @@ vi.mock("../src/config", () => ({
   },
   API_PORT: 8642,
   DASHBOARD_PORT: 9119,
+  // Pre-existing gap: docker.ts imports these two named exports too (Tmpfs
+  // mount options), and vitest throws "No export defined on mock" the moment
+  // runContainer's Tmpfs template literal reads an export this mock never
+  // declared — unrelated to network isolation, just adjacent in the same mock.
+  HERMES_UID: 10000,
+  HERMES_GID: 10000,
 }));
 
 const { tailLogs, stopAndRemove, inspectExitCode, inspectTerminalState } = await import(
@@ -29,6 +39,14 @@ const { tailLogs, stopAndRemove, inspectExitCode, inspectTerminalState } = await
 
 beforeEach(() => {
   getContainer.mockReset();
+  // Re-armed every test: the file's later `afterEach(() => vi.restoreAllMocks())`
+  // (added for the docker.createContainer spy) also clears plain vi.fn()
+  // implementations, not just spies — so a one-time module-load default here
+  // would silently go missing starting with whichever test runs after that
+  // afterEach first fires. Default: network already exists, so
+  // ensureAgentNetwork() is a one-call no-op for tests that don't care about it.
+  listNetworksMock.mockReset().mockResolvedValue([{ Name: "hermes-agents" }]);
+  createNetworkMock.mockReset();
 });
 
 // Build one dockerode multiplexed log frame: 8-byte header + payload.
@@ -166,10 +184,13 @@ test("runContainer builds the Hermes createContainer arg object (data bind, two 
   // Both /tmp (gateway scratch) and /run (s6-overlay init needs it writable) —
   // a read-only rootfs without /run kills the image's init with exit 111.
   expect(hostConfig.Tmpfs).toEqual({
-    "/tmp": "rw,exec,size=512m",
-    "/run": "rw,exec,size=512m",
+    "/tmp": "rw,exec,size=512m,uid=10000,gid=10000",
+    "/run": "rw,exec,size=512m,uid=10000,gid=10000",
   });
   expect(hostConfig.SecurityOpt).toEqual(["no-new-privileges"]);
+  // Isolated network, not Docker's default `bridge` — sibling agent
+  // containers can't reach this one (icc disabled on the network itself).
+  expect(hostConfig.NetworkMode).toBe("hermes-agents");
   // Writable HERMES_HOME bind — the one rw path on the read-only rootfs that the
   // gateway needs for its .env (bot tokens), config, and sessions.
   expect(hostConfig.Binds).toEqual([
@@ -220,4 +241,82 @@ test("waitForHealth throws after the boot timeout when /health never returns 200
     vi.fn().mockRejectedValue(new Error("ECONNREFUSED")),
   );
   await expect(waitForHealth(13000)).rejects.toThrow(/health.*did not return 200/i);
+});
+
+// --- ensureAgentNetwork: module-isolated so the in-process "already ensured"
+// cache from the tests above doesn't mask these — each case re-imports fresh.
+test("ensureAgentNetwork creates the isolated network with ICC disabled when absent", async () => {
+  vi.resetModules();
+  const listNetworks = vi.fn().mockResolvedValue([]);
+  const createNetwork = vi.fn().mockResolvedValue(undefined);
+  vi.doMock("dockerode", () => ({
+    default: vi.fn().mockImplementation(() => ({ listNetworks, createNetwork })),
+  }));
+  vi.doMock("../src/config", () => ({
+    config: { dockerSocket: "/var/run/docker.sock" },
+    API_PORT: 8642,
+    DASHBOARD_PORT: 9119,
+  }));
+
+  const { ensureAgentNetwork } = await import("../src/docker");
+  await ensureAgentNetwork();
+
+  expect(createNetwork).toHaveBeenCalledWith({
+    Name: "hermes-agents",
+    Driver: "bridge",
+    Options: { "com.docker.network.bridge.enable_icc": "false" },
+  });
+});
+
+test("ensureAgentNetwork is a no-op when the network already exists", async () => {
+  vi.resetModules();
+  const listNetworks = vi.fn().mockResolvedValue([{ Name: "hermes-agents" }]);
+  const createNetwork = vi.fn();
+  vi.doMock("dockerode", () => ({
+    default: vi.fn().mockImplementation(() => ({ listNetworks, createNetwork })),
+  }));
+  vi.doMock("../src/config", () => ({
+    config: { dockerSocket: "/var/run/docker.sock" },
+    API_PORT: 8642,
+    DASHBOARD_PORT: 9119,
+  }));
+
+  const { ensureAgentNetwork } = await import("../src/docker");
+  await ensureAgentNetwork();
+
+  expect(createNetwork).not.toHaveBeenCalled();
+});
+
+test("ensureAgentNetwork swallows an 'already exists' race from a concurrent create", async () => {
+  vi.resetModules();
+  const listNetworks = vi.fn().mockResolvedValue([]);
+  const createNetwork = vi.fn().mockRejectedValue(new Error("network with name hermes-agents already exists"));
+  vi.doMock("dockerode", () => ({
+    default: vi.fn().mockImplementation(() => ({ listNetworks, createNetwork })),
+  }));
+  vi.doMock("../src/config", () => ({
+    config: { dockerSocket: "/var/run/docker.sock" },
+    API_PORT: 8642,
+    DASHBOARD_PORT: 9119,
+  }));
+
+  const { ensureAgentNetwork } = await import("../src/docker");
+  await expect(ensureAgentNetwork()).resolves.toBeUndefined();
+});
+
+test("ensureAgentNetwork propagates a real daemon failure", async () => {
+  vi.resetModules();
+  const listNetworks = vi.fn().mockResolvedValue([]);
+  const createNetwork = vi.fn().mockRejectedValue(new Error("permission denied"));
+  vi.doMock("dockerode", () => ({
+    default: vi.fn().mockImplementation(() => ({ listNetworks, createNetwork })),
+  }));
+  vi.doMock("../src/config", () => ({
+    config: { dockerSocket: "/var/run/docker.sock" },
+    API_PORT: 8642,
+    DASHBOARD_PORT: 9119,
+  }));
+
+  const { ensureAgentNetwork } = await import("../src/docker");
+  await expect(ensureAgentNetwork()).rejects.toThrow(/permission denied/);
 });

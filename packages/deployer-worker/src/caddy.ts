@@ -56,6 +56,10 @@ function wsRouteId(agentId: string): string {
   return `${agentId}::ws`;
 }
 
+function shellWsRouteId(agentId: string): string {
+  return `${agentId}::shellws`;
+}
+
 // The dashboard's WebSocket + event-stream endpoints. forward_auth strips the
 // `Upgrade`/`Connection` headers, so a gated WS upgrade arrives at the dashboard
 // as a plain GET → 401 → the browser sees "session ended (1006)" and a dead
@@ -214,8 +218,24 @@ export async function addRoute(
           upstreams: [{ dial: `127.0.0.1:${dashboardPort}` }],
         };
 
+    // The owner-shell WS (shell.ts on the worker, NOT the container). Always
+    // registered in subdomain mode regardless of dashboardAuth — the shell
+    // has its own independent owner+agent-bound token check (ws-auth.ts,
+    // same as the deploy socket), so it isn't gated by the dashboard cookie
+    // flag. No forward_auth here either: same reason as the dashboard's own
+    // WS paths below — forward_auth strips the Upgrade/Connection headers
+    // and would break the upgrade. Path-scoped (not just host), so it MUST
+    // be ordered before any host-wide catch-all route below (Caddy is
+    // first-match-wins) or the container route would swallow it first.
+    const shellWsRoute: CaddyRoute = {
+      "@id": shellWsRouteId(agentId),
+      match: [{ host: [host], path: [`/v1/agents/${agentId}/shell`] }],
+      handle: [{ handler: "reverse_proxy", upstreams: [{ dial: `127.0.0.1:${cfg.wsPort}` }] }],
+    };
+
     if (!cfg.dashboardAuth) {
       await prependRoutes([
+        shellWsRoute,
         { "@id": agentId, match: [{ host: [host] }], handle: [containerProxy] },
       ]);
       return;
@@ -246,7 +266,7 @@ export async function addRoute(
       match: [{ host: [host] }],
       handle: [forwardAuthHandler(agentId), containerProxy],
     };
-    await prependRoutes([gateRoute, wsRoute, gatedRoute]);
+    await prependRoutes([gateRoute, wsRoute, shellWsRoute, gatedRoute]);
     return;
   }
 
@@ -312,9 +332,10 @@ async function prependRoutes(toAdd: CaddyRoute[]): Promise<void> {
 
 export async function removeRoute(agentId: string): Promise<void> {
   if (cfg.skipCaddy) return;
-  // Delete the container route plus the (possibly-absent) gate + ws routes. 404
-  // on any means it already went away — idempotent for the §5 rollback path.
-  for (const id of [agentId, gateRouteId(agentId), wsRouteId(agentId)]) {
+  // Delete the container route plus the (possibly-absent) gate + ws + shellws
+  // routes. 404 on any means it already went away — idempotent for the §5
+  // rollback path.
+  for (const id of [agentId, gateRouteId(agentId), wsRouteId(agentId), shellWsRouteId(agentId)]) {
     const res = await adminFetch(`/id/${id}`, { method: "DELETE" });
     if (!res.ok && res.status !== 404) {
       throw new Error(`Caddy removeRoute failed: ${res.status} ${await res.text()}`);

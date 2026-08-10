@@ -15,6 +15,8 @@
     "@hermes/provisioner": "workspace:*",
     "@hermes/telegram-gateway": "workspace:*",
     "@prisma/client": "^6.2.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "next": "16.2.7",
     "next-auth": "5.0.0-beta.31",
     "react": "19.2.4",

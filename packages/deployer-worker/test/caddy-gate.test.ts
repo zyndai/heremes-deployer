@@ -59,11 +59,13 @@ describe("addRoute (subdomain + dashboard auth)", () => {
     const patch = calls.find((c) => c.method === "PATCH" && c.path.endsWith("/routes"));
     const next = JSON.parse(patch!.init!.body as string);
 
-    // Order: gate route, ws-passthrough route, gated container route, "other".
+    // Order: gate route, ws-passthrough route, owner-shell WS route, gated
+    // container route, "other".
     expect(next[0]["@id"]).toBe("agent_1::gate");
     expect(next[1]["@id"]).toBe("agent_1::ws");
-    expect(next[2]["@id"]).toBe("agent_1");
-    expect(next[3]["@id"]).toBe("other");
+    expect(next[2]["@id"]).toBe("agent_1::shellws");
+    expect(next[3]["@id"]).toBe("agent_1");
+    expect(next[4]["@id"]).toBe("other");
 
     // Gate route: matches /__hermes_gate on the agent host, proxies to the
     // worker port, and tags the request with the agent id.
@@ -83,9 +85,19 @@ describe("addRoute (subdomain + dashboard auth)", () => {
     expect(ws.handle[0].handler).toBe("reverse_proxy");
     expect(ws.handle[0].upstreams[0].dial).toBe("127.0.0.1:13002");
 
+    // Owner-shell WS route: path-scoped to this agent's own shell path, no
+    // forward_auth (same reasoning as the ws-passthrough route — upgrade
+    // headers must survive), proxied to the WORKER (not the dashboard port).
+    const shellWs = next[2];
+    expect(shellWs.match[0].host).toEqual([host]);
+    expect(shellWs.match[0].path).toEqual(["/v1/agents/agent_1/shell"]);
+    expect(shellWs.handle).toHaveLength(1);
+    expect(shellWs.handle[0].handler).toBe("reverse_proxy");
+    expect(shellWs.handle[0].upstreams[0].dial).toBe("127.0.0.1:7072");
+
     // Container route: forward_auth FIRST (so a failed check blocks), then the
     // real proxy to the dashboard port.
-    const gated = next[2];
+    const gated = next[3];
     expect(gated.match[0].host).toEqual([host]);
     expect(gated.handle[0].handler).toBe("reverse_proxy");
     expect(gated.handle[0].rewrite.uri).toBe("/__hermes_check");
@@ -94,11 +106,35 @@ describe("addRoute (subdomain + dashboard auth)", () => {
     expect(gated.handle[1].upstreams[0].dial).toBe("127.0.0.1:13002");
   });
 
-  it("removeRoute deletes the container, gate, and ws routes", async () => {
+  it("removeRoute deletes the container, gate, ws, and shellws routes", async () => {
     await removeRoute("agent_1");
     const deletes = calls.filter((c) => c.method === "DELETE").map((c) => c.path);
     expect(deletes).toContain("/id/agent_1");
     expect(deletes).toContain("/id/agent_1::gate");
     expect(deletes).toContain("/id/agent_1::ws");
+    expect(deletes).toContain("/id/agent_1::shellws");
+  });
+});
+
+describe("addRoute (subdomain, dashboard auth OFF)", () => {
+  it("still registers the owner-shell WS route ahead of the open container catch-all", async () => {
+    // #given dashboardAuth is off (module-level flag flipped for this block)
+    process.env.DEPLOYER_DASHBOARD_AUTH = "false";
+    vi.resetModules();
+    const { addRoute: addRouteNoAuth } = await import("../src/caddy.js");
+
+    // #when a route is added
+    await addRouteNoAuth("agent_2", "open-bot", 13005);
+
+    // #then the shell WS route precedes the open (ungated) container route —
+    // shell access must never depend on the dashboard-cookie flag, and Caddy
+    // is first-match-wins so ordering is what makes that true.
+    const patch = calls.find((c) => c.method === "PATCH" && c.path.endsWith("/routes"));
+    const next = JSON.parse(patch!.init!.body as string);
+    expect(next[0]["@id"]).toBe("agent_2::shellws");
+    expect(next[0].match[0].path).toEqual(["/v1/agents/agent_2/shell"]);
+    expect(next[1]["@id"]).toBe("agent_2");
+
+    process.env.DEPLOYER_DASHBOARD_AUTH = "true";
   });
 });

@@ -22,6 +22,7 @@ import {
   handleGateCheck,
 } from "./dashboard-gate";
 import { subscribe, snapshotSteps, type Frame } from "./events";
+import { parseShellPath, handleShellSession } from "./shell";
 
 // The deploy socket sends the events.ts Frame union plus a `hello` handshake
 // frame that only the WS layer emits.
@@ -182,31 +183,48 @@ export function startWsServer(): Promise<WsHandle | null> {
     if (handleGateHttp(req, res)) return;
     res.writeHead(426, { "Content-Type": "text/plain" });
     res.end(
-      "Upgrade required: connect with ws(s)://<host>/v1/agents/<agentId>/deploy?token=<t>\n",
+      "Upgrade required: connect with ws(s)://<host>/v1/agents/<agentId>/deploy?token=<t> " +
+        "or ws(s)://<host>/v1/agents/<agentId>/shell?token=<t>\n",
     );
   });
 
   const wss = new WebSocketServer({ noServer: true });
 
   httpServer.on("upgrade", (req: IncomingMessage, socket, head) => {
-    const parsed = parseDeployPath(req.url);
-    if (!parsed) {
-      socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
-      socket.destroy();
+    const deployPath = parseDeployPath(req.url);
+    if (deployPath) {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        handleSession(ws, deployPath.agentId, deployPath.token).catch((err) => {
+          // Never surface internals to the client; an Agent row lookup can fail.
+          console.error(`[ws] session ${deployPath.agentId} failed:`, err);
+          try {
+            send(ws, { type: "error", code: "internal", message: "internal error" });
+            ws.close(1011, "internal");
+          } catch {
+            // Socket already gone.
+          }
+        });
+      });
       return;
     }
-    wss.handleUpgrade(req, socket, head, (ws) => {
-      handleSession(ws, parsed.agentId, parsed.token).catch((err) => {
-        // Never surface internals to the client; an Agent row lookup can fail.
-        console.error(`[ws] session ${parsed.agentId} failed:`, err);
-        try {
-          send(ws, { type: "error", code: "internal", message: "internal error" });
-          ws.close(1011, "internal");
-        } catch {
-          // Socket already gone.
-        }
+
+    const shellPath = parseShellPath(req.url);
+    if (shellPath) {
+      wss.handleUpgrade(req, socket, head, (ws) => {
+        handleShellSession(ws, shellPath.agentId, shellPath.token).catch((err) => {
+          console.error(`[ws] shell session ${shellPath.agentId} failed:`, err);
+          try {
+            ws.close(1011, "internal");
+          } catch {
+            // Socket already gone.
+          }
+        });
       });
-    });
+      return;
+    }
+
+    socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
+    socket.destroy();
   });
 
   return new Promise((resolve) => {
