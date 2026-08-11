@@ -22,6 +22,9 @@ vi.mock("../src/config", () => ({
     containerTmpfsMb: 512,
     bootHealthTimeoutMs: 1000,
     bootHealthIntervalMs: 10,
+    toolboxImage: "hermes/toolbox:latest",
+    toolboxMemoryMb: 512,
+    toolboxCpuMillis: 500,
   },
   API_PORT: 8642,
   DASHBOARD_PORT: 9119,
@@ -135,7 +138,7 @@ test("inspectTerminalState maps state + converts the memory limit to MB", async 
 // --- appended: Task 23 ---
 import { afterEach } from "vitest";
 
-const { runContainer, waitForHealth, docker } = await import("../src/docker");
+const { runContainer, runToolboxContainer, waitForHealth, docker } = await import("../src/docker");
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -319,4 +322,47 @@ test("ensureAgentNetwork propagates a real daemon failure", async () => {
 
   const { ensureAgentNetwork } = await import("../src/docker");
   await expect(ensureAgentNetwork()).rejects.toThrow(/permission denied/);
+});
+
+test("runToolboxContainer builds an ephemeral, isolated, bind-mounted toolbox container", async () => {
+  const start = vi.fn().mockResolvedValue(undefined);
+  const createContainer = vi
+    .spyOn(docker, "createContainer")
+    .mockResolvedValue({ id: "toolboxbeefcafe0000", start } as never);
+
+  const id = await runToolboxContainer({
+    agentId: "agent-1",
+    dataDir: "/var/lib/hermes-deployer/agents/agent-1/data",
+  });
+
+  expect(id).toBe("toolboxbeefcafe0000");
+  expect(start).toHaveBeenCalledOnce();
+
+  const arg = createContainer.mock.calls[0]![0] as Record<string, unknown>;
+  const hostConfig = arg.HostConfig as Record<string, unknown>;
+
+  expect(arg.name).toMatch(/^hermes-shell-agent-1-/);
+  expect(arg.Image).toBe("hermes/toolbox:latest");
+  expect(arg.Cmd).toEqual(["/bin/bash", "-i"]);
+  expect(arg.User).toBe("10000:10000");
+  expect(arg.WorkingDir).toBe("/opt/data");
+  expect(arg.Env).toEqual([
+    "HOME=/opt/data",
+    "TERM=xterm-256color",
+    "XDG_CACHE_HOME=/tmp/.cache",
+    "npm_config_cache=/tmp/.npm-cache",
+    "PIP_CACHE_DIR=/tmp/.pip-cache",
+  ]);
+  expect(hostConfig.Binds).toEqual([
+    "/var/lib/hermes-deployer/agents/agent-1/data:/opt/data:rw",
+  ]);
+  expect(hostConfig.NetworkMode).toBe("hermes-agents");
+  expect(hostConfig.ReadonlyRootfs).toBe(true);
+  expect(hostConfig.AutoRemove).toBe(true);
+  expect(hostConfig.Memory).toBe(512 * 1024 * 1024);
+  expect(hostConfig.NanoCpus).toBe(500 * 1_000_000);
+  // NOT hermes.agent — the crash watcher treats any die/oom event carrying
+  // that label as the AGENT crashing. Closing a terminal tab must never mark
+  // the real agent crashed.
+  expect(arg.Labels).toEqual({ "hermes.toolbox-for": "agent-1" });
 });

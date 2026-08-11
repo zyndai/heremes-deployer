@@ -84,6 +84,17 @@ export const config = {
   // far smaller than zynd's (no npm/pip caches, no installed node_modules).
   containerTmpfsMb: numberEnv("DEPLOYER_CONTAINER_TMPFS_MB", 128),
 
+  // Ephemeral dev-shell image for the agent terminal (shell.ts) — a separate,
+  // richer image (git/vim/nano/pip/build-essential, see
+  // infra/hermes-toolbox-image) than the Hermes gateway image, so owners get
+  // a real dev environment without the terminal ever touching the image that
+  // actually runs their agent. Optional (empty default, NOT required like
+  // hermesImage) so a worker without it configured yet still boots — shell.ts
+  // just refuses new terminal sessions with a clear error until it's set.
+  toolboxImage: optional("TOOLBOX_IMAGE", ""),
+  toolboxMemoryMb: numberEnv("DEPLOYER_TOOLBOX_MEM_MB", 512),
+  toolboxCpuMillis: numberEnv("DEPLOYER_TOOLBOX_CPU_MILLIS", 500),
+
   // How long to wait for a freshly started container's /health to return 200
   // before declaring the deploy FAILED. The image is already complete (no
   // entrypoint install step), so only the gateway's ~20-45s boot remains.

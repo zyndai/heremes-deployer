@@ -268,6 +268,77 @@ export async function runContainer(opts: RunContainerOpts): Promise<string> {
   return container.id;
 }
 
+export interface RunToolboxOpts {
+  agentId: string;
+  /** Same bind dir the gateway container uses (paths.agentData(agentId)) —
+   * editing a file from the toolbox and from the gateway container hit the
+   * exact same files, there's no separate copy to keep in sync. */
+  dataDir: string;
+}
+
+/**
+ * Start an ephemeral dev-shell container for one terminal session: a richer,
+ * separate image (config.toolboxImage — git/vim/nano/pip/build-essential,
+ * see infra/hermes-toolbox-image) bind-mounted at the agent's own /opt/data,
+ * so owners get a real dev environment without the terminal ever touching
+ * the image that actually runs their agent. Caller (shell.ts) attaches to
+ * this container's PID 1 directly (no exec layer needed — the whole
+ * container exists for this one shell) and MUST stopAndRemove() it when the
+ * WS closes; AutoRemove is a backstop for the case where the worker itself
+ * restarts mid-session, not a substitute for that explicit teardown.
+ */
+export async function runToolboxContainer(opts: RunToolboxOpts): Promise<string> {
+  await ensureAgentNetwork();
+
+  // Unique per session, deliberately NOT named/labeled hermes-<agentId> or
+  // hermes.agent=<id> — the crash watcher treats any die/oom event carrying
+  // that label as the AGENT crashing. Closing a terminal tab must never mark
+  // the real agent crashed.
+  const name = `hermes-shell-${opts.agentId}-${Date.now().toString(36)}`;
+  console.log(`[docker] runToolboxContainer agent=${opts.agentId} name=${name}`);
+
+  const container = await docker.createContainer({
+    name,
+    Image: config.toolboxImage,
+    Cmd: ["/bin/bash", "-i"],
+    Env: [
+      "HOME=/opt/data",
+      "TERM=xterm-256color",
+      // Keep package-manager caches off the persistent agent data dir (which
+      // holds config.yaml/sessions/etc.) — scratch tmpfs instead.
+      "XDG_CACHE_HOME=/tmp/.cache",
+      "npm_config_cache=/tmp/.npm-cache",
+      "PIP_CACHE_DIR=/tmp/.pip-cache",
+    ],
+    Tty: true,
+    OpenStdin: true,
+    AttachStdin: true,
+    AttachStdout: true,
+    AttachStderr: true,
+    User: `${HERMES_UID}:${HERMES_GID}`,
+    WorkingDir: "/opt/data",
+    HostConfig: {
+      Binds: [`${opts.dataDir}:/opt/data:rw`],
+      NetworkMode: AGENT_NETWORK_NAME,
+      Memory: config.toolboxMemoryMb * 1024 * 1024,
+      NanoCpus: config.toolboxCpuMillis * 1_000_000,
+      ReadonlyRootfs: true,
+      Tmpfs: {
+        "/tmp": `rw,exec,size=${config.containerTmpfsMb}m,uid=${HERMES_UID},gid=${HERMES_GID}`,
+        "/run": `rw,exec,size=${config.containerTmpfsMb}m,uid=${HERMES_UID},gid=${HERMES_GID}`,
+      },
+      SecurityOpt: ["no-new-privileges"],
+      // Backstop cleanup — see the doc comment above.
+      AutoRemove: true,
+    },
+    Labels: { "hermes.toolbox-for": opts.agentId },
+  });
+
+  await container.start();
+  console.log(`[docker] toolbox started agent=${opts.agentId} container=${container.id.slice(0, 12)}`);
+  return container.id;
+}
+
 /**
  * Pull a Docker image by tag. Returns when the pull completes (or throws).
  * dockerode surfaces auth errors / not-found as rejections, which the caller

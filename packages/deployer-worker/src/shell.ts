@@ -1,12 +1,12 @@
-// Owner-only interactive shell into an agent's OWN container (spec: give each
-// agent owner a terminal to set env/config themselves, scoped to that one
-// container — never the EC2 host, never another agent's container).
+// Owner-only interactive dev shell for an agent (spec: give each agent owner
+// a terminal to set env/config and do real dev work themselves, scoped to
+// that agent's own data — never the EC2 host, never another agent).
 //
 // Path:   /v1/agents/<agentId>/shell?token=<short-lived owner token>
 // Wire:   client -> server: JSON text frames {type:"data",data} | {type:"resize",cols,rows}
-//         server -> client: raw binary frames (exec's combined stdout+stderr,
-//         Tty:true so Docker does NOT multiplex — unlike the non-TTY logs()
-//         path in docker.ts, no 8-byte frame headers to strip here)
+//         server -> client: raw binary frames (the container's combined
+//         stdout+stderr, Tty:true so Docker does NOT multiplex — unlike the
+//         non-TTY logs() path in docker.ts, no 8-byte frame headers to strip)
 //
 // Reuses the exact deploy-WS trust model (ws-auth.ts HMAC token, agent+user
 // bound) rather than Caddy's forward_auth cookie: this socket is reached
@@ -14,20 +14,23 @@
 // same as the deploy socket, directly on the worker's wsPort, so the token
 // check must hold on its own regardless of transport path.
 //
-// Container-scoping (not host-scoping): dockerode's container.exec() runs
-// INSIDE that container's namespaces by construction — there is no path from
-// here to the host shell. The exec runs as HERMES_UID:HERMES_GID (not root),
-// matching the main gateway process, so it inherits the same confinement as
-// the app itself: read-only rootfs (can't touch the image), writable only in
-// /opt/data and the tmpfs /tmp,/run (see docker.ts runContainer). Sibling
-// agent containers are unreachable too (isolated network, see
-// ensureAgentNetwork in docker.ts) — a compromised shell can't pivot to them.
+// One EPHEMERAL container per session (docker.ts runToolboxContainer), not
+// an exec into the gateway container: a separate, richer image
+// (infra/hermes-toolbox-image — git/vim/nano/pip/build-essential) bind-
+// mounted at the SAME /opt/data the gateway uses, so owners get a real dev
+// environment and the terminal never touches the image that actually runs
+// their agent. Scoping is otherwise identical to the exec approach: runs as
+// HERMES_UID:HERMES_GID (never root), read-only rootfs (can't persist
+// anything outside /opt/data + tmpfs /tmp,/run), isolated network (can't
+// reach any other agent's container, gateway or toolbox). Torn down
+// (stopAndRemove) when the WS closes — this container exists for exactly one
+// terminal session.
 
 import type { WebSocket } from "ws";
 
 import { prisma } from "./db";
-import { docker } from "./docker";
-import { HERMES_UID, HERMES_GID } from "./config";
+import { docker, runToolboxContainer, stopAndRemove } from "./docker";
+import { config, paths } from "./config";
 import { verifyToken } from "./ws-auth";
 
 export interface ShellPath {
@@ -94,7 +97,7 @@ export async function handleShellSession(
 
   const agent = await prisma.agent.findUnique({
     where: { id: agentId },
-    select: { userId: true, status: true, containerId: true },
+    select: { userId: true, status: true },
   });
   if (!agent) {
     ws.close(4404, "not_found");
@@ -104,69 +107,61 @@ export async function handleShellSession(
     ws.close(4403, "forbidden");
     return;
   }
-  if (agent.status !== "running" || !agent.containerId) {
-    // 4409: agent exists and is owned, but there's no live container to exec
-    // into (stopped/crashed/still deploying). Distinct from 4404/4403 so the
-    // client can show "agent isn't running" instead of a generic error.
+  if (agent.status !== "running") {
+    // 4409: agent exists and is owned, but isn't running (stopped/crashed/
+    // still deploying) — the frontend only offers the Terminal tab when
+    // running, but the server enforces it independently.
     ws.close(4409, "not_running");
     return;
   }
+  if (!config.toolboxImage) {
+    ws.close(4501, "toolbox_not_configured");
+    return;
+  }
 
-  let execStream: NodeJS.ReadWriteStream | null = null;
-  try {
-    const container = docker.getContainer(agent.containerId);
-    const exec = await container.exec({
-      // -i is load-bearing, not cosmetic: without it bash starts without job
-      // control (monitor mode off), which breaks two things a real dev
-      // session needs — (1) Ctrl-C sends SIGINT to the whole process group
-      // including the shell itself (exit 130), killing the session instead
-      // of just the foreground command; (2) any subprocess that prompts via
-      // /dev/tty directly (ssh's host-key confirmation, the #1 way `git
-      // clone git@...` "just hangs") never gets its prompt serviced, because
-      // that depends on proper foreground-process-group handoff, which only
-      // happens under job control. Confirmed via direct dockerode repro
-      // against a live agent: without -i, `git clone git@github.com:...`
-      // hangs forever with zero output past "Cloning into..."; with -i, the
-      // host-key prompt renders and answering it unblocks the clone. sh is
-      // the portable baseline (alpine images ship ash as /bin/sh, not bash);
-      // prefer bash when present without hard-failing when it isn't.
-      Cmd: ["/bin/sh", "-c", "exec bash -i 2>/dev/null || exec sh -i"],
-      AttachStdin: true,
-      AttachStdout: true,
-      AttachStderr: true,
-      Tty: true,
-      // TERM unset otherwise — full-screen/color-aware tools (less, any
-      // future editor, colored CLI output) need it to behave correctly.
-      Env: ["TERM=xterm-256color"],
-      // Same uid:gid as the gateway process itself (docker.ts runContainer) —
-      // never root. Read-only rootfs + this uid caps what a shell can touch
-      // to /opt/data and the /tmp,/run tmpfs, same as the app's own blast
-      // radius. No new privilege the app doesn't already have.
-      User: `${HERMES_UID}:${HERMES_GID}`,
-      WorkingDir: "/opt/data",
+  let toolboxId: string | null = null;
+  let attachStream: NodeJS.ReadWriteStream | null = null;
+  const cleanup = (): void => {
+    const id = toolboxId;
+    toolboxId = null;
+    if (!id) return;
+    stopAndRemove(id).catch((e) => {
+      console.error(`[shell] agent=${agentId} toolbox=${id.slice(0, 12)} cleanup failed:`, e);
     });
-    execStream = await exec.start({ hijack: true, stdin: true, Tty: true });
+  };
 
-    execStream.on("data", (chunk: Buffer) => {
+  try {
+    toolboxId = await runToolboxContainer({ agentId, dataDir: paths.agentData(agentId) });
+    const container = docker.getContainer(toolboxId);
+    attachStream = await container.attach({
+      hijack: true,
+      stream: true,
+      stdin: true,
+      stdout: true,
+      stderr: true,
+    });
+
+    attachStream.on("data", (chunk: Buffer) => {
       if (ws.readyState === ws.OPEN) ws.send(chunk);
     });
-    execStream.on("error", () => {
+    attachStream.on("error", () => {
       try {
-        ws.close(1011, "exec_stream_error");
+        ws.close(1011, "attach_stream_error");
       } catch {
         // Socket already gone.
       }
     });
-    execStream.on("close", () => {
+    attachStream.on("close", () => {
       try {
-        ws.close(1000, "exec_ended");
+        ws.close(1000, "session_ended");
       } catch {
         // Socket already gone.
       }
+      cleanup();
     });
 
     ws.on("message", (raw: WebSocket.RawData, isBinary: boolean) => {
-      if (isBinary || !execStream) return;
+      if (isBinary || !attachStream) return;
       // Text frames only reach here; the ws library reassembles them into a
       // single Buffer by default (no fragmentation option is set anywhere in
       // this codebase), so this is exhaustive in practice — the fallback
@@ -177,9 +172,9 @@ export async function handleShellSession(
       const frame = parseClientFrame(text);
       if (!frame) return;
       if (frame.type === "data") {
-        execStream.write(frame.data);
+        attachStream.write(frame.data);
       } else {
-        exec.resize({ h: frame.rows, w: frame.cols }).catch(() => {
+        container.resize({ h: frame.rows, w: frame.cols }).catch(() => {
           // Resize is cosmetic (reflow) — a failure here shouldn't kill the
           // session, the shell just keeps the previous dimensions.
         });
@@ -188,18 +183,20 @@ export async function handleShellSession(
 
     ws.on("close", () => {
       try {
-        execStream?.end();
+        attachStream?.end();
       } catch {
         // Stream already gone.
       }
+      cleanup();
     });
   } catch (e) {
-    console.error(`[shell] agent=${agentId} exec failed:`, (e as Error).message);
+    console.error(`[shell] agent=${agentId} toolbox session failed:`, (e as Error).message);
     try {
-      execStream?.end();
+      attachStream?.end();
     } catch {
       // Stream never opened or already gone — nothing to clean up.
     }
+    cleanup();
     try {
       ws.close(1011, "internal");
     } catch {
