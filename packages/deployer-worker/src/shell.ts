@@ -116,13 +116,28 @@ export async function handleShellSession(
   try {
     const container = docker.getContainer(agent.containerId);
     const exec = await container.exec({
-      // sh is the portable baseline (alpine images ship ash as /bin/sh, not
-      // bash); prefer bash when present without hard-failing when it isn't.
-      Cmd: ["/bin/sh", "-c", "exec bash 2>/dev/null || exec sh"],
+      // -i is load-bearing, not cosmetic: without it bash starts without job
+      // control (monitor mode off), which breaks two things a real dev
+      // session needs — (1) Ctrl-C sends SIGINT to the whole process group
+      // including the shell itself (exit 130), killing the session instead
+      // of just the foreground command; (2) any subprocess that prompts via
+      // /dev/tty directly (ssh's host-key confirmation, the #1 way `git
+      // clone git@...` "just hangs") never gets its prompt serviced, because
+      // that depends on proper foreground-process-group handoff, which only
+      // happens under job control. Confirmed via direct dockerode repro
+      // against a live agent: without -i, `git clone git@github.com:...`
+      // hangs forever with zero output past "Cloning into..."; with -i, the
+      // host-key prompt renders and answering it unblocks the clone. sh is
+      // the portable baseline (alpine images ship ash as /bin/sh, not bash);
+      // prefer bash when present without hard-failing when it isn't.
+      Cmd: ["/bin/sh", "-c", "exec bash -i 2>/dev/null || exec sh -i"],
       AttachStdin: true,
       AttachStdout: true,
       AttachStderr: true,
       Tty: true,
+      // TERM unset otherwise — full-screen/color-aware tools (less, any
+      // future editor, colored CLI output) need it to behave correctly.
+      Env: ["TERM=xterm-256color"],
       // Same uid:gid as the gateway process itself (docker.ts runContainer) —
       // never root. Read-only rootfs + this uid caps what a shell can touch
       // to /opt/data and the /tmp,/run tmpfs, same as the app's own blast

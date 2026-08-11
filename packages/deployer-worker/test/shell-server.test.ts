@@ -136,6 +136,26 @@ describe("shell WS session", () => {
     ws.close();
   });
 
+  it("starts bash/sh with -i so job control is on (regression: without it, Ctrl-C kills the whole shell instead of just the foreground command, and any /dev/tty prompt like ssh's host-key confirmation hangs forever)", async () => {
+    // #given a running, owned agent
+    findUnique.mockResolvedValue({ userId: "user_1", status: "running", containerId: "c1" });
+    const stream = fakeExecStream();
+    execMock.mockResolvedValue({
+      start: vi.fn().mockResolvedValue(stream),
+      resize: vi.fn().mockResolvedValue(undefined),
+    });
+    getContainer.mockReturnValue({ exec: execMock });
+    const token = mintToken("agent_abc", "user_1", 60);
+    const ws = connect(`/v1/agents/agent_abc/shell?token=${token}`);
+    await waitOpen(ws);
+
+    await vi.waitFor(() => expect(execMock).toHaveBeenCalled());
+    const call = execMock.mock.calls[0]![0];
+    expect(call.Cmd).toEqual(["/bin/sh", "-c", "exec bash -i 2>/dev/null || exec sh -i"]);
+    expect(call.Env).toContain("TERM=xterm-256color");
+    ws.close();
+  });
+
   it("forwards exec stdout bytes to the client as binary frames", async () => {
     // #given a connected shell session
     findUnique.mockResolvedValue({ userId: "user_1", status: "running", containerId: "c1" });
