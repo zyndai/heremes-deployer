@@ -51,6 +51,15 @@ export function AgentTerminal({ agentId }: { agentId: string }) {
       term.loadAddon(fit);
       term.open(el);
       fit.fit();
+      // Without this, the terminal never receives keystrokes until the user
+      // clicks inside it a SECOND time: it's reached by clicking the
+      // "Terminal" tab button, which keeps DOM focus on that button — xterm
+      // only wires keyboard capture to its own hidden textarea, and nothing
+      // moves focus there automatically on mount. Confirmed via a Playwright
+      // repro: without this call, document.activeElement stays the tab
+      // button and zero keystrokes reach term.onData; with it, focus lands
+      // on xterm's textarea and typing works immediately.
+      term.focus();
 
       const socket = new WebSocket(data.wsUrl);
       socket.binaryType = "arraybuffer";
